@@ -39,7 +39,10 @@ public partial class MainWindow : Window
     private const int OrbitEntryDurationMs = 320;
     private const int OrbitExitDurationMs = 220;
     private const int OrbitScrollDurationMs = 220;
+    private const int OrbitSwapDurationMs = 240;
     private const int OrbitAnimationStaggerMs = 34;
+    private const double DraggedTileScale = 1.08;
+    private const double DragTargetScale = 1.04;
     private const string AddOrbitItemKey = "__add__";
 
     private static readonly System.Windows.Point[] OrbitSlotPositions =
@@ -69,7 +72,13 @@ public partial class MainWindow : Window
     private bool _isHotkeyRegistered;
     private bool _isVisibilityAnimationRunning;
     private bool _isScrollAnimationRunning;
+    private bool _isShortcutDragActive;
     private int _shortcutScrollIndex;
+    private Border? _pressedShortcutTile;
+    private Border? _dragTargetTile;
+    private AppShortcutEntry? _pressedShortcut;
+    private System.Windows.Point _dragStartPointerPosition;
+    private System.Windows.Point _dragSourceSlotPosition;
 
     public MainWindow()
     {
@@ -565,6 +574,131 @@ public partial class MainWindow : Window
         };
     }
 
+    private static System.Windows.Point GetTilePosition(Border tile)
+    {
+        return new(Canvas.GetLeft(tile), Canvas.GetTop(tile));
+    }
+
+    private void AnimateTileScale(Border tile, double targetScale, int durationMs)
+    {
+        var easing = new CubicEase { EasingMode = EasingMode.EaseOut };
+        ScaleTransform scaleTransform = GetTileScaleTransform(tile);
+        scaleTransform.BeginAnimation(ScaleTransform.ScaleXProperty, CreateAnimation(targetScale, durationMs, TimeSpan.Zero, easing));
+        scaleTransform.BeginAnimation(ScaleTransform.ScaleYProperty, CreateAnimation(targetScale, durationMs, TimeSpan.Zero, easing));
+    }
+
+    private static bool IsDragGesture(System.Windows.Point startPosition, System.Windows.Point currentPosition)
+    {
+        return Math.Abs(currentPosition.X - startPosition.X) >= SystemParameters.MinimumHorizontalDragDistance
+            || Math.Abs(currentPosition.Y - startPosition.Y) >= SystemParameters.MinimumVerticalDragDistance;
+    }
+
+    private static bool IsPointerOverTile(Border tile, System.Windows.Point pointerPosition)
+    {
+        System.Windows.Point tilePosition = GetTilePosition(tile);
+
+        return pointerPosition.X >= tilePosition.X
+            && pointerPosition.X <= tilePosition.X + tile.Width
+            && pointerPosition.Y >= tilePosition.Y
+            && pointerPosition.Y <= tilePosition.Y + tile.Height;
+    }
+
+    private Border? FindShortcutTileAt(System.Windows.Point pointerPosition)
+    {
+        for (int index = 0; index < ShortcutOrbitLayer.Children.Count; index++)
+        {
+            if (ShortcutOrbitLayer.Children[index] is not Border tile
+                || ReferenceEquals(tile, _pressedShortcutTile)
+                || tile.Tag is not AppShortcutEntry
+                || !IsPointerOverTile(tile, pointerPosition))
+            {
+                continue;
+            }
+
+            return tile;
+        }
+
+        return null;
+    }
+
+    private void UpdateDragTargetTile(Border? nextTargetTile)
+    {
+        if (ReferenceEquals(_dragTargetTile, nextTargetTile))
+        {
+            return;
+        }
+
+        if (_dragTargetTile is not null)
+        {
+            AnimateTileScale(_dragTargetTile, 1, 120);
+        }
+
+        _dragTargetTile = nextTargetTile;
+
+        if (_dragTargetTile is not null)
+        {
+            AnimateTileScale(_dragTargetTile, DragTargetScale, 120);
+        }
+    }
+
+    private void ClearDragState()
+    {
+        if (_dragTargetTile is not null)
+        {
+            AnimateTileScale(_dragTargetTile, 1, 120);
+        }
+
+        _pressedShortcutTile?.ReleaseMouseCapture();
+        _pressedShortcutTile = null;
+        _pressedShortcut = null;
+        _dragTargetTile = null;
+        _isShortcutDragActive = false;
+    }
+
+    private bool TrySwapShortcuts(AppShortcutEntry firstShortcut, AppShortcutEntry secondShortcut)
+    {
+        int firstIndex = _shortcuts.FindIndex(item =>
+            string.Equals(item.ShortcutPath, firstShortcut.ShortcutPath, StringComparison.OrdinalIgnoreCase));
+        int secondIndex = _shortcuts.FindIndex(item =>
+            string.Equals(item.ShortcutPath, secondShortcut.ShortcutPath, StringComparison.OrdinalIgnoreCase));
+
+        if (firstIndex < 0 || secondIndex < 0 || firstIndex == secondIndex)
+        {
+            return false;
+        }
+
+        (_shortcuts[firstIndex], _shortcuts[secondIndex]) = (_shortcuts[secondIndex], _shortcuts[firstIndex]);
+        return true;
+    }
+
+    private async Task AnimateShortcutSwapAsync(
+        Border draggedTile,
+        AppShortcutEntry draggedShortcut,
+        System.Windows.Point sourceSlotPosition,
+        Border targetTile,
+        AppShortcutEntry targetShortcut)
+    {
+        System.Windows.Point targetSlotPosition = GetTilePosition(targetTile);
+
+        AnimateTileToPosition(draggedTile, targetSlotPosition, 1, 1, 0, 0, OrbitSwapDurationMs);
+        AnimateTileToPosition(targetTile, sourceSlotPosition, 1, 1, 0, 0, OrbitSwapDurationMs);
+        await Task.Delay(OrbitSwapDurationMs);
+
+        if (TrySwapShortcuts(draggedShortcut, targetShortcut))
+        {
+            SaveShortcuts();
+        }
+
+        RefreshShortcutStrip();
+    }
+
+    private async Task AnimateShortcutReturnAsync(Border tile, System.Windows.Point sourceSlotPosition)
+    {
+        AnimateTileToPosition(tile, sourceSlotPosition, 1, 1, 0, 0, OrbitSwapDurationMs);
+        await Task.Delay(OrbitSwapDurationMs);
+        RefreshShortcutStrip();
+    }
+
     private void AnimateOrbitCollapse()
     {
         System.Windows.Point collapsePoint = GetOrbitCollapsePoint();
@@ -661,7 +795,9 @@ public partial class MainWindow : Window
         contextMenu.Items.Add(removeItem);
 
         border.ContextMenu = contextMenu;
-        border.MouseLeftButtonUp += ShortcutTile_Click;
+        border.MouseLeftButtonDown += ShortcutTile_MouseLeftButtonDown;
+        border.MouseMove += ShortcutTile_MouseMove;
+        border.MouseLeftButtonUp += ShortcutTile_MouseLeftButtonUp;
 
         return border;
     }
@@ -698,7 +834,7 @@ public partial class MainWindow : Window
 
     private async void OrbitScene_PreviewMouseWheel(object sender, MouseWheelEventArgs e)
     {
-        if (_isVisibilityAnimationRunning || _isScrollAnimationRunning)
+        if (_isVisibilityAnimationRunning || _isScrollAnimationRunning || _pressedShortcutTile is not null)
         {
             return;
         }
@@ -732,12 +868,90 @@ public partial class MainWindow : Window
         e.Handled = true;
     }
 
-    private void ShortcutTile_Click(object sender, MouseButtonEventArgs e)
+    private void ShortcutTile_MouseLeftButtonDown(object sender, MouseButtonEventArgs e)
     {
-        if (sender is Border border && border.Tag is AppShortcutEntry shortcut)
+        if (_isVisibilityAnimationRunning
+            || _isScrollAnimationRunning
+            || sender is not Border border
+            || border.Tag is not AppShortcutEntry shortcut)
         {
-            LaunchShortcut(shortcut);
+            return;
         }
+
+        _pressedShortcutTile = border;
+        _pressedShortcut = shortcut;
+        _dragStartPointerPosition = e.GetPosition(ShortcutOrbitLayer);
+        _dragSourceSlotPosition = GetTilePosition(border);
+        _isShortcutDragActive = false;
+        UpdateDragTargetTile(null);
+
+        System.Windows.Controls.Panel.SetZIndex(border, 1000);
+        border.CaptureMouse();
+        e.Handled = true;
+    }
+
+    private void ShortcutTile_MouseMove(object sender, System.Windows.Input.MouseEventArgs e)
+    {
+        if (_pressedShortcutTile is null || _pressedShortcut is null || e.LeftButton != MouseButtonState.Pressed)
+        {
+            return;
+        }
+
+        System.Windows.Point pointerPosition = e.GetPosition(ShortcutOrbitLayer);
+
+        if (!_isShortcutDragActive)
+        {
+            if (!IsDragGesture(_dragStartPointerPosition, pointerPosition))
+            {
+                return;
+            }
+
+            _isShortcutDragActive = true;
+            AnimateTileScale(_pressedShortcutTile, DraggedTileScale, 120);
+            _pressedShortcutTile.Opacity = 0.92;
+        }
+
+        Canvas.SetLeft(_pressedShortcutTile, pointerPosition.X - (OrbitTileSize / 2));
+        Canvas.SetTop(_pressedShortcutTile, pointerPosition.Y - (OrbitTileSize / 2));
+        UpdateDragTargetTile(FindShortcutTileAt(pointerPosition));
+        e.Handled = true;
+    }
+
+    private async void ShortcutTile_MouseLeftButtonUp(object sender, MouseButtonEventArgs e)
+    {
+        if (_pressedShortcutTile is null || _pressedShortcut is null)
+        {
+            return;
+        }
+
+        Border draggedTile = _pressedShortcutTile;
+        AppShortcutEntry draggedShortcut = _pressedShortcut;
+        Border? targetTile = _dragTargetTile;
+        System.Windows.Point sourceSlotPosition = _dragSourceSlotPosition;
+        bool wasDragging = _isShortcutDragActive;
+
+        ClearDragState();
+
+        if (!wasDragging)
+        {
+            LaunchShortcut(draggedShortcut);
+            e.Handled = true;
+            return;
+        }
+
+        draggedTile.Opacity = 1;
+        System.Windows.Controls.Panel.SetZIndex(draggedTile, 0);
+
+        if (targetTile is not null && targetTile.Tag is AppShortcutEntry targetShortcut)
+        {
+            await AnimateShortcutSwapAsync(draggedTile, draggedShortcut, sourceSlotPosition, targetTile, targetShortcut);
+        }
+        else
+        {
+            await AnimateShortcutReturnAsync(draggedTile, sourceSlotPosition);
+        }
+
+        e.Handled = true;
     }
 
     private void AddShortcutTile_Click(object sender, MouseButtonEventArgs e)
