@@ -532,6 +532,36 @@ public partial class MainWindow : Window
         await ShowFromTrayAsync();
     }
 
+    public async Task ActivateFromExternalRequestAsync()
+    {
+        if (_isExitRequested)
+        {
+            return;
+        }
+
+        await WaitForVisibilityAnimationAsync();
+
+        if (!IsLoaded)
+        {
+            return;
+        }
+
+        if (!IsVisible)
+        {
+            await ShowFromTrayAsync();
+            return;
+        }
+
+        if (WindowState == WindowState.Minimized)
+        {
+            WindowState = WindowState.Normal;
+        }
+
+        PositionWindow();
+        RefreshShortcutStrip();
+        BringWindowToFront();
+    }
+
     private async Task ShowFromTrayAsync()
     {
         _isVisibilityAnimationRunning = true;
@@ -540,8 +570,7 @@ public partial class MainWindow : Window
         Show();
         WindowState = WindowState.Normal;
         RefreshShortcutStrip(animateFromCenter: true);
-        Activate();
-        Focus();
+        BringWindowToFront();
         await Task.Delay(GetOrbitAnimationTotalDurationMs(ShortcutOrbitLayer.Children.Count, OrbitEntryDurationMs));
         _isVisibilityAnimationRunning = false;
     }
@@ -576,6 +605,26 @@ public partial class MainWindow : Window
 
         Left = workArea.Left + (workArea.Width - Width) / 2;
         Top = workArea.Bottom - Height - BottomMargin;
+    }
+
+    private async Task WaitForVisibilityAnimationAsync()
+    {
+        int attempt = 0;
+
+        while (_isVisibilityAnimationRunning && attempt < 20)
+        {
+            await Task.Delay(50);
+            attempt++;
+        }
+    }
+
+    private void BringWindowToFront()
+    {
+        Activate();
+        Focus();
+
+        Topmost = true;
+        Topmost = false;
     }
 
     private void ExitApplication()
