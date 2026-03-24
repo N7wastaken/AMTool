@@ -9,4 +9,6 @@ public sealed class AppSettings
     public Key HotkeyKey { get; set; } = Key.Q;
 
     public bool AutoStartEnabled { get; set; }
+
+    public bool HasCompletedTutorial { get; set; }
 }

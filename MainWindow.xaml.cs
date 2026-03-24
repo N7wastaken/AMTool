@@ -74,6 +74,7 @@ public partial class MainWindow : Window
 
     private HwndSource? _hwndSource;
     private Forms.NotifyIcon? _trayIcon;
+    private Drawing.Icon? _applicationTrayIcon;
     private bool _isExitRequested;
     private bool _isHotkeyRegistered;
     private bool _isVisibilityAnimationRunning;
@@ -81,6 +82,7 @@ public partial class MainWindow : Window
     private bool _isShortcutDragActive;
     private int _shortcutScrollIndex;
     private bool _isAutoStartEnabled;
+    private bool _hasCompletedTutorial;
     private ModifierKeys _hotkeyModifiers = ModifierKeys.Control | ModifierKeys.Shift;
     private Key _hotkeyKey = Key.Q;
     private Border? _pressedShortcutTile;
@@ -133,6 +135,7 @@ public partial class MainWindow : Window
             }
 
             _isAutoStartEnabled = settings?.AutoStartEnabled == true;
+            _hasCompletedTutorial = settings?.HasCompletedTutorial == true;
         }
         catch
         {
@@ -153,7 +156,8 @@ public partial class MainWindow : Window
                 {
                     HotkeyModifiers = _hotkeyModifiers,
                     HotkeyKey = _hotkeyKey,
-                    AutoStartEnabled = _isAutoStartEnabled
+                    AutoStartEnabled = _isAutoStartEnabled,
+                    HasCompletedTutorial = _hasCompletedTutorial
                 },
                 JsonOptions);
 
@@ -233,9 +237,14 @@ public partial class MainWindow : Window
         InitializeTrayIcon();
     }
 
-    private void MainWindow_Loaded(object sender, RoutedEventArgs e)
+    private async void MainWindow_Loaded(object sender, RoutedEventArgs e)
     {
         HideToTrayImmediate();
+
+        if (!_hasCompletedTutorial)
+        {
+            await ShowFirstRunTutorialAsync();
+        }
     }
 
     private void MainWindow_Closing(object? sender, CancelEventArgs e)
@@ -269,6 +278,12 @@ public partial class MainWindow : Window
             _trayIcon.Visible = false;
             _trayIcon.Dispose();
             _trayIcon = null;
+        }
+
+        if (_applicationTrayIcon is not null)
+        {
+            _applicationTrayIcon.Dispose();
+            _applicationTrayIcon = null;
         }
     }
 
@@ -477,9 +492,11 @@ public partial class MainWindow : Window
         trayMenu.Items.Add("Pokaz / ukryj", null, (_, _) => ToggleWindowVisibility());
         trayMenu.Items.Add("Zamknij", null, (_, _) => ExitApplication());
 
+        _applicationTrayIcon = LoadApplicationTrayIcon();
+
         _trayIcon = new Forms.NotifyIcon
         {
-            Icon = Drawing.SystemIcons.Application,
+            Icon = _applicationTrayIcon ?? Drawing.SystemIcons.Application,
             Text = "AMTool",
             Visible = true,
             ContextMenuStrip = trayMenu
@@ -565,6 +582,55 @@ public partial class MainWindow : Window
     {
         _isExitRequested = true;
         System.Windows.Application.Current.Shutdown();
+    }
+
+    private static Drawing.Icon? LoadApplicationTrayIcon()
+    {
+        try
+        {
+            string executablePath = Environment.ProcessPath ?? Process.GetCurrentProcess().MainModule?.FileName ?? string.Empty;
+
+            if (string.IsNullOrWhiteSpace(executablePath) || !File.Exists(executablePath))
+            {
+                return null;
+            }
+
+            using Drawing.Icon? sourceIcon = Drawing.Icon.ExtractAssociatedIcon(executablePath);
+            return sourceIcon is null ? null : (Drawing.Icon)sourceIcon.Clone();
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private async Task ShowFirstRunTutorialAsync()
+    {
+        FirstRunTutorialDialog dialog;
+
+        try
+        {
+            dialog = new FirstRunTutorialDialog();
+        }
+        catch
+        {
+            System.Windows.MessageBox.Show(
+                "Nie udalo sie przygotowac tutorialu pierwszego uruchomienia.",
+                "AMTool",
+                MessageBoxButton.OK,
+                MessageBoxImage.Warning);
+            await ShowFromTrayAsync();
+            return;
+        }
+
+        if (TryShowDialog(dialog, "Nie udalo sie otworzyc tutorialu pierwszego uruchomienia.", out bool? dialogResult)
+            && dialogResult == true)
+        {
+            _hasCompletedTutorial = true;
+            SaveSettings();
+        }
+
+        await ShowFromTrayAsync();
     }
 
     private void LoadShortcuts()
@@ -1112,10 +1178,10 @@ public partial class MainWindow : Window
 
         InfoBadge.ToolTip = string.Join(
             Environment.NewLine,
-            $"{GetCurrentHotkeyText()} pokazuje lub chowa panel.",
+            $"{GetCurrentHotkeyText()} wywoluje AMTool.",
             "LPM uruchamia aplikacje.",
             "PPM usuwa skrot z listy.",
-            "PPM na i otwiera ustawienia.",
+            "PPM na ( i ) otwiera ustawienia.",
             $"Autostart: {(_isAutoStartEnabled ? "wlaczony" : "wylaczony")}.",
             $"Liczba skrotow: {_shortcuts.Count}.",
             scrollInfo);
