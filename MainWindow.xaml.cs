@@ -26,6 +26,8 @@ public partial class MainWindow : Window
     private const int HotkeyIdToggleWindow = 9001;
     private const uint MOD_CONTROL = 0x0002;
     private const uint MOD_SHIFT = 0x0004;
+    private const uint MOD_ALT = 0x0001;
+    private const uint MOD_WIN = 0x0008;
     private const double BottomMargin = 24;
     private const int MaxVisibleOrbitTiles = 5;
     private const double OrbitTileSize = 88;
@@ -46,6 +48,7 @@ public partial class MainWindow : Window
     private const double DragTargetScale = 1.04;
     private const double HoverTileScale = 1.06;
     private const string AddOrbitItemKey = "__add__";
+    private const string AutoStartRegistryValueName = "AMTool";
 
     private static readonly System.Windows.Point[] OrbitSlotPositions =
     [
@@ -63,10 +66,11 @@ public partial class MainWindow : Window
 
     private readonly List<AppShortcutEntry> _shortcuts = [];
     private readonly Dictionary<string, ImageSource?> _iconCache = new(StringComparer.OrdinalIgnoreCase);
-    private readonly string _storagePath = Path.Combine(
+    private readonly string _appDataDirectory = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-        "AMTool",
-        "shortcuts.json");
+        "AMTool");
+    private readonly string _storagePath;
+    private readonly string _settingsPath;
 
     private HwndSource? _hwndSource;
     private Forms.NotifyIcon? _trayIcon;
@@ -76,6 +80,9 @@ public partial class MainWindow : Window
     private bool _isScrollAnimationRunning;
     private bool _isShortcutDragActive;
     private int _shortcutScrollIndex;
+    private bool _isAutoStartEnabled;
+    private ModifierKeys _hotkeyModifiers = ModifierKeys.Control | ModifierKeys.Shift;
+    private Key _hotkeyKey = Key.Q;
     private Border? _pressedShortcutTile;
     private Border? _dragTargetTile;
     private AppShortcutEntry? _pressedShortcut;
@@ -85,14 +92,134 @@ public partial class MainWindow : Window
     public MainWindow()
     {
         InitializeComponent();
+        _storagePath = Path.Combine(_appDataDirectory, "shortcuts.json");
+        _settingsPath = Path.Combine(_appDataDirectory, "settings.json");
+        InitializeInfoBadgeInteractions();
 
         SourceInitialized += MainWindow_SourceInitialized;
         Loaded += MainWindow_Loaded;
         Closing += MainWindow_Closing;
         Closed += MainWindow_Closed;
 
+        LoadSettings();
         LoadShortcuts();
         RefreshShortcutStrip();
+    }
+
+    private void InitializeInfoBadgeInteractions()
+    {
+        InfoBadge.Cursor = System.Windows.Input.Cursors.Hand;
+        InfoBadge.MouseRightButtonUp += InfoBadge_MouseRightButtonUp;
+        UpdateHotkeyUi();
+    }
+
+    private void LoadSettings()
+    {
+        if (!File.Exists(_settingsPath))
+        {
+            UpdateHotkeyUi();
+            return;
+        }
+
+        try
+        {
+            string json = File.ReadAllText(_settingsPath);
+            AppSettings? settings = JsonSerializer.Deserialize<AppSettings>(json);
+
+            if (settings is not null && HotkeyUtilities.IsValidHotkey(settings.HotkeyModifiers, settings.HotkeyKey))
+            {
+                _hotkeyModifiers = HotkeyUtilities.SanitizeModifiers(settings.HotkeyModifiers);
+                _hotkeyKey = settings.HotkeyKey;
+            }
+
+            _isAutoStartEnabled = settings?.AutoStartEnabled == true;
+        }
+        catch
+        {
+        }
+
+        ApplyAutoStartSetting(_isAutoStartEnabled);
+        UpdateHotkeyUi();
+    }
+
+    private void SaveSettings()
+    {
+        try
+        {
+            Directory.CreateDirectory(_appDataDirectory);
+
+            string json = JsonSerializer.Serialize(
+                new AppSettings
+                {
+                    HotkeyModifiers = _hotkeyModifiers,
+                    HotkeyKey = _hotkeyKey,
+                    AutoStartEnabled = _isAutoStartEnabled
+                },
+                JsonOptions);
+
+            File.WriteAllText(_settingsPath, json);
+        }
+        catch
+        {
+            System.Windows.MessageBox.Show(
+                "Nie udalo sie zapisac ustawien.",
+                "AMTool",
+                MessageBoxButton.OK,
+                MessageBoxImage.Warning);
+        }
+    }
+
+    private bool TryShowDialog(Window dialog, string failureMessage, out bool? result)
+    {
+        result = null;
+
+        try
+        {
+            result = dialog.ShowDialog();
+            return true;
+        }
+        catch
+        {
+            System.Windows.MessageBox.Show(
+                failureMessage,
+                "AMTool",
+                MessageBoxButton.OK,
+                MessageBoxImage.Warning);
+            return false;
+        }
+    }
+
+    private bool TryShowFileDialog(Microsoft.Win32.OpenFileDialog dialog, out bool? result)
+    {
+        result = null;
+
+        try
+        {
+            result = dialog.ShowDialog(this);
+            return true;
+        }
+        catch
+        {
+            System.Windows.MessageBox.Show(
+                "Nie udalo sie otworzyc okna wyboru pliku.",
+                "AMTool",
+                MessageBoxButton.OK,
+                MessageBoxImage.Warning);
+            return false;
+        }
+    }
+
+    private void UpdateHotkeyUi()
+    {
+        if (InfoBadge is not null)
+        {
+            UpdateInfoTooltip(_shortcuts.Count + 1);
+        }
+    }
+
+    private string GetCurrentHotkeyText()
+    {
+        return HotkeyUtilities.FormatHotkey(_hotkeyModifiers, _hotkeyKey);
     }
 
     private void MainWindow_SourceInitialized(object? sender, EventArgs e)
@@ -150,16 +277,192 @@ public partial class MainWindow : Window
         _isHotkeyRegistered = RegisterHotKey(
             hwnd,
             HotkeyIdToggleWindow,
-            MOD_CONTROL | MOD_SHIFT,
-            (uint)KeyInterop.VirtualKeyFromKey(Key.Q));
+            ToNativeHotkeyModifiers(_hotkeyModifiers),
+            (uint)KeyInterop.VirtualKeyFromKey(_hotkeyKey));
 
         if (!_isHotkeyRegistered)
         {
             System.Windows.MessageBox.Show(
-                "Nie udalo sie zarejestrowac skrotu Ctrl+Shift+Q.",
+                $"Nie udalo sie zarejestrowac skrotu {GetCurrentHotkeyText()}.",
                 "AMTool",
                 MessageBoxButton.OK,
                 MessageBoxImage.Warning);
+        }
+    }
+
+    private uint ToNativeHotkeyModifiers(ModifierKeys modifiers)
+    {
+        ModifierKeys sanitizedModifiers = HotkeyUtilities.SanitizeModifiers(modifiers);
+        uint nativeModifiers = 0;
+
+        if (sanitizedModifiers.HasFlag(ModifierKeys.Control))
+        {
+            nativeModifiers |= MOD_CONTROL;
+        }
+
+        if (sanitizedModifiers.HasFlag(ModifierKeys.Shift))
+        {
+            nativeModifiers |= MOD_SHIFT;
+        }
+
+        if (sanitizedModifiers.HasFlag(ModifierKeys.Alt))
+        {
+            nativeModifiers |= MOD_ALT;
+        }
+
+        if (sanitizedModifiers.HasFlag(ModifierKeys.Windows))
+        {
+            nativeModifiers |= MOD_WIN;
+        }
+
+        return nativeModifiers;
+    }
+
+    private bool TryApplyHotkey(ModifierKeys newModifiers, Key newKey)
+    {
+        if (_hwndSource is null || !HotkeyUtilities.IsValidHotkey(newModifiers, newKey))
+        {
+            return false;
+        }
+
+        IntPtr hwnd = new WindowInteropHelper(this).Handle;
+        ModifierKeys previousModifiers = _hotkeyModifiers;
+        Key previousKey = _hotkeyKey;
+
+        if (_isHotkeyRegistered)
+        {
+            UnregisterHotKey(hwnd, HotkeyIdToggleWindow);
+            _isHotkeyRegistered = false;
+        }
+
+        _hotkeyModifiers = HotkeyUtilities.SanitizeModifiers(newModifiers);
+        _hotkeyKey = newKey;
+        _isHotkeyRegistered = RegisterHotKey(
+            hwnd,
+            HotkeyIdToggleWindow,
+            ToNativeHotkeyModifiers(_hotkeyModifiers),
+            (uint)KeyInterop.VirtualKeyFromKey(_hotkeyKey));
+
+        if (_isHotkeyRegistered)
+        {
+            SaveSettings();
+            UpdateHotkeyUi();
+            return true;
+        }
+
+        _hotkeyModifiers = previousModifiers;
+        _hotkeyKey = previousKey;
+        _isHotkeyRegistered = RegisterHotKey(
+            hwnd,
+            HotkeyIdToggleWindow,
+            ToNativeHotkeyModifiers(_hotkeyModifiers),
+            (uint)KeyInterop.VirtualKeyFromKey(_hotkeyKey));
+
+        System.Windows.MessageBox.Show(
+            $"Nie udalo sie ustawic skrotu {HotkeyUtilities.FormatHotkey(newModifiers, newKey)}. Ten skrot moze byc juz zajety.",
+            "AMTool",
+            MessageBoxButton.OK,
+            MessageBoxImage.Warning);
+
+        UpdateHotkeyUi();
+        return false;
+    }
+
+    private void ApplyAutoStartSetting(bool enabled)
+    {
+        const string runKeyPath = @"Software\Microsoft\Windows\CurrentVersion\Run";
+
+        try
+        {
+            using Microsoft.Win32.RegistryKey? runKey = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(runKeyPath, writable: true);
+
+            if (runKey is null)
+            {
+                return;
+            }
+
+            if (enabled)
+            {
+                string executablePath = Environment.ProcessPath ?? Process.GetCurrentProcess().MainModule?.FileName ?? string.Empty;
+
+                if (!string.IsNullOrWhiteSpace(executablePath))
+                {
+                    runKey.SetValue(AutoStartRegistryValueName, $"\"{executablePath}\"");
+                }
+            }
+            else
+            {
+                runKey.DeleteValue(AutoStartRegistryValueName, throwOnMissingValue: false);
+            }
+        }
+        catch
+        {
+            System.Windows.MessageBox.Show(
+                "Nie udalo sie zaktualizowac ustawienia autostartu.",
+                "AMTool",
+                MessageBoxButton.OK,
+                MessageBoxImage.Warning);
+        }
+    }
+
+    private void ApplyAndPersistAutoStartSetting(bool enabled)
+    {
+        _isAutoStartEnabled = enabled;
+        ApplyAutoStartSetting(_isAutoStartEnabled);
+        SaveSettings();
+        UpdateHotkeyUi();
+    }
+
+    private void OpenSettingsDialog()
+    {
+        while (true)
+        {
+            SettingsDialog dialog;
+
+            try
+            {
+                dialog = new SettingsDialog(_hotkeyModifiers, _hotkeyKey, _isAutoStartEnabled)
+                {
+                    Owner = this
+                };
+            }
+            catch
+            {
+                System.Windows.MessageBox.Show(
+                    "Nie udalo sie przygotowac okna ustawien.",
+                    "AMTool",
+                    MessageBoxButton.OK,
+                    MessageBoxImage.Warning);
+                return;
+            }
+
+            if (!TryShowDialog(dialog, "Nie udalo sie otworzyc okna ustawien.", out bool? dialogResult))
+            {
+                return;
+            }
+
+            if (dialogResult != true)
+            {
+                return;
+            }
+
+            bool hotkeyChanged = dialog.SelectedHotkeyModifiers != _hotkeyModifiers || dialog.SelectedHotkeyKey != _hotkeyKey;
+
+            if (hotkeyChanged && !TryApplyHotkey(dialog.SelectedHotkeyModifiers, dialog.SelectedHotkeyKey))
+            {
+                continue;
+            }
+
+            if (dialog.AutoStartEnabled != _isAutoStartEnabled)
+            {
+                ApplyAndPersistAutoStartSetting(dialog.AutoStartEnabled);
+            }
+            else if (!hotkeyChanged)
+            {
+                SaveSettings();
+            }
+
+            return;
         }
     }
 
@@ -809,9 +1112,11 @@ public partial class MainWindow : Window
 
         InfoBadge.ToolTip = string.Join(
             Environment.NewLine,
-            "Ctrl+Shift+Q pokazuje lub chowa panel.",
+            $"{GetCurrentHotkeyText()} pokazuje lub chowa panel.",
             "LPM uruchamia aplikacje.",
             "PPM usuwa skrot z listy.",
+            "PPM na i otwiera ustawienia.",
+            $"Autostart: {(_isAutoStartEnabled ? "wlaczony" : "wylaczony")}.",
             $"Liczba skrotow: {_shortcuts.Count}.",
             scrollInfo);
     }
@@ -1064,6 +1369,12 @@ public partial class MainWindow : Window
         }
     }
 
+    private void InfoBadge_MouseRightButtonUp(object sender, MouseButtonEventArgs e)
+    {
+        OpenSettingsDialog();
+        e.Handled = true;
+    }
+
     private void AddShortcutTile_Click(object sender, MouseButtonEventArgs e)
     {
         ShowAddShortcutDialog();
@@ -1087,7 +1398,7 @@ public partial class MainWindow : Window
             Multiselect = false
         };
 
-        if (dialog.ShowDialog(this) != true)
+        if (!TryShowFileDialog(dialog, out bool? dialogResult) || dialogResult != true)
         {
             return;
         }
