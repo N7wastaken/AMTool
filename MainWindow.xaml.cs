@@ -380,12 +380,13 @@ public partial class MainWindow : Window
     private List<object?> GetVisibleOrbitItems(int scrollIndex)
     {
         List<object?> orbitItems = BuildOrbitItems();
-        int visibleCount = Math.Min(MaxVisibleOrbitTiles, orbitItems.Count - scrollIndex);
+        int visibleCount = Math.Min(MaxVisibleOrbitTiles, orbitItems.Count);
         var visibleOrbitItems = new List<object?>(visibleCount);
 
         for (int index = 0; index < visibleCount; index++)
         {
-            visibleOrbitItems.Add(orbitItems[scrollIndex + index]);
+            int orbitIndex = (scrollIndex + index) % orbitItems.Count;
+            visibleOrbitItems.Add(orbitItems[orbitIndex]);
         }
 
         return visibleOrbitItems;
@@ -401,7 +402,21 @@ public partial class MainWindow : Window
 
     private static int GetMaxShortcutScrollIndex(int totalTileCount)
     {
-        return Math.Max(0, totalTileCount - MaxVisibleOrbitTiles);
+        return totalTileCount > MaxVisibleOrbitTiles
+            ? totalTileCount - 1
+            : 0;
+    }
+
+    private static int GetLoopedScrollIndex(int currentScrollIndex, int scrollDirection, int maxScrollIndex)
+    {
+        if (maxScrollIndex == 0)
+        {
+            return 0;
+        }
+
+        return scrollDirection > 0
+            ? currentScrollIndex >= maxScrollIndex ? 0 : currentScrollIndex + 1
+            : currentScrollIndex <= 0 ? maxScrollIndex : currentScrollIndex - 1;
     }
 
     private Border CreateTileForOrbitItem(object? orbitItem)
@@ -789,7 +804,7 @@ public partial class MainWindow : Window
     private void UpdateInfoTooltip(int totalTileCount)
     {
         string scrollInfo = totalTileCount > MaxVisibleOrbitTiles
-            ? $"Kolko myszy przewija kolejne skroty. Widok {_shortcutScrollIndex + 1} z {GetMaxShortcutScrollIndex(totalTileCount) + 1}."
+            ? $"Kolko myszy przewija kolejne skroty w petli. Widok {_shortcutScrollIndex + 1} z {GetMaxShortcutScrollIndex(totalTileCount) + 1}."
             : "Do 5 skrotow widac od razu bez przewijania.";
 
         InfoBadge.ToolTip = string.Join(
@@ -912,9 +927,8 @@ public partial class MainWindow : Window
             return;
         }
 
-        int nextScrollIndex = e.Delta < 0
-            ? Math.Min(_shortcutScrollIndex + 1, maxScrollIndex)
-            : Math.Max(_shortcutScrollIndex - 1, 0);
+        int scrollDirection = e.Delta < 0 ? 1 : -1;
+        int nextScrollIndex = GetLoopedScrollIndex(_shortcutScrollIndex, scrollDirection, maxScrollIndex);
 
         if (nextScrollIndex == _shortcutScrollIndex)
         {
@@ -922,7 +936,6 @@ public partial class MainWindow : Window
         }
 
         int previousScrollIndex = _shortcutScrollIndex;
-        int scrollDirection = nextScrollIndex > _shortcutScrollIndex ? 1 : -1;
 
         _isScrollAnimationRunning = true;
         _shortcutScrollIndex = nextScrollIndex;
