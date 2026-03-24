@@ -54,8 +54,8 @@
                             <ColumnDefinition Width="Auto"/>
                         </Grid.ColumnDefinitions>
 
-                        <TextBlock VerticalAlignment="Center"
-                                   Text="AMTool"
+                        <TextBlock x:Name="CenterSlotNameText"
+                                   VerticalAlignment="Center"
                                    FontSize="28"
                                    FontWeight="Bold"
                                    Foreground="White"/>

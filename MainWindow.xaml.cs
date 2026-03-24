@@ -41,8 +41,10 @@ public partial class MainWindow : Window
     private const int OrbitScrollDurationMs = 220;
     private const int OrbitSwapDurationMs = 240;
     private const int OrbitAnimationStaggerMs = 34;
+    private const int OrbitHoverDurationMs = 140;
     private const double DraggedTileScale = 1.08;
     private const double DragTargetScale = 1.04;
+    private const double HoverTileScale = 1.06;
     private const string AddOrbitItemKey = "__add__";
 
     private static readonly System.Windows.Point[] OrbitSlotPositions =
@@ -314,6 +316,7 @@ public partial class MainWindow : Window
 
         List<object?> visibleOrbitItems = GetVisibleOrbitItems(_shortcutScrollIndex);
         System.Windows.Point collapsePoint = GetOrbitCollapsePoint();
+        UpdateCenterSlotName(visibleOrbitItems);
 
         for (int slotIndex = 0; slotIndex < visibleOrbitItems.Count; slotIndex++)
         {
@@ -342,6 +345,23 @@ public partial class MainWindow : Window
         }
 
         UpdateInfoTooltip(_shortcuts.Count + 1);
+    }
+
+    private void UpdateCenterSlotName(List<object?> visibleOrbitItems)
+    {
+        object? middleOrbitItem = visibleOrbitItems.Count > 2
+            ? visibleOrbitItems[2]
+            : null;
+
+        if (middleOrbitItem is AppShortcutEntry shortcut)
+        {
+            CenterSlotNameText.Text = shortcut.DisplayName;
+            CenterSlotNameText.Visibility = Visibility.Visible;
+            return;
+        }
+
+        CenterSlotNameText.Text = string.Empty;
+        CenterSlotNameText.Visibility = Visibility.Collapsed;
     }
 
     private List<object?> BuildOrbitItems()
@@ -587,6 +607,42 @@ public partial class MainWindow : Window
         scaleTransform.BeginAnimation(ScaleTransform.ScaleYProperty, CreateAnimation(targetScale, durationMs, TimeSpan.Zero, easing));
     }
 
+    private static System.Windows.Controls.ToolTip CreateTileTooltip(string text)
+    {
+        return new System.Windows.Controls.ToolTip
+        {
+            Content = text,
+            Placement = System.Windows.Controls.Primitives.PlacementMode.Mouse,
+            HasDropShadow = true
+        };
+    }
+
+    private void HandleTileMouseEnter(Border tile)
+    {
+        if (_pressedShortcutTile is not null
+            || _isVisibilityAnimationRunning
+            || _isScrollAnimationRunning
+            || ReferenceEquals(tile, _dragTargetTile))
+        {
+            return;
+        }
+
+        AnimateTileScale(tile, HoverTileScale, OrbitHoverDurationMs);
+    }
+
+    private void HandleTileMouseLeave(Border tile)
+    {
+        if (_pressedShortcutTile is not null
+            || _isVisibilityAnimationRunning
+            || _isScrollAnimationRunning
+            || ReferenceEquals(tile, _dragTargetTile))
+        {
+            return;
+        }
+
+        AnimateTileScale(tile, 1, OrbitHoverDurationMs);
+    }
+
     private static bool IsDragGesture(System.Windows.Point startPosition, System.Windows.Point currentPosition)
     {
         return Math.Abs(currentPosition.X - startPosition.X) >= SystemParameters.MinimumHorizontalDragDistance
@@ -782,8 +838,11 @@ public partial class MainWindow : Window
             Cursor = System.Windows.Input.Cursors.Hand,
             Uid = BuildOrbitItemKey(shortcut),
             Tag = shortcut,
-            ToolTip = shortcut.DisplayName
+            ToolTip = CreateTileTooltip(shortcut.DisplayName)
         };
+
+        ToolTipService.SetInitialShowDelay(border, 120);
+        ToolTipService.SetShowDuration(border, 4000);
 
         var contextMenu = new ContextMenu();
         var removeItem = new MenuItem
@@ -795,6 +854,8 @@ public partial class MainWindow : Window
         contextMenu.Items.Add(removeItem);
 
         border.ContextMenu = contextMenu;
+        border.MouseEnter += ShortcutTile_MouseEnter;
+        border.MouseLeave += ShortcutTile_MouseLeave;
         border.MouseLeftButtonDown += ShortcutTile_MouseLeftButtonDown;
         border.MouseMove += ShortcutTile_MouseMove;
         border.MouseLeftButtonUp += ShortcutTile_MouseLeftButtonUp;
@@ -825,9 +886,13 @@ public partial class MainWindow : Window
             Child = plusText,
             Cursor = System.Windows.Input.Cursors.Hand,
             Uid = AddOrbitItemKey,
-            ToolTip = "Dodaj skrot"
+            ToolTip = CreateTileTooltip("Dodaj skrot")
         };
 
+        ToolTipService.SetInitialShowDelay(border, 120);
+        ToolTipService.SetShowDuration(border, 3000);
+        border.MouseEnter += AddTile_MouseEnter;
+        border.MouseLeave += AddTile_MouseLeave;
         border.MouseLeftButtonUp += AddShortcutTile_Click;
         return border;
     }
@@ -952,6 +1017,38 @@ public partial class MainWindow : Window
         }
 
         e.Handled = true;
+    }
+
+    private void ShortcutTile_MouseEnter(object sender, System.Windows.Input.MouseEventArgs e)
+    {
+        if (sender is Border border)
+        {
+            HandleTileMouseEnter(border);
+        }
+    }
+
+    private void ShortcutTile_MouseLeave(object sender, System.Windows.Input.MouseEventArgs e)
+    {
+        if (sender is Border border)
+        {
+            HandleTileMouseLeave(border);
+        }
+    }
+
+    private void AddTile_MouseEnter(object sender, System.Windows.Input.MouseEventArgs e)
+    {
+        if (sender is Border border)
+        {
+            HandleTileMouseEnter(border);
+        }
+    }
+
+    private void AddTile_MouseLeave(object sender, System.Windows.Input.MouseEventArgs e)
+    {
+        if (sender is Border border)
+        {
+            HandleTileMouseLeave(border);
+        }
     }
 
     private void AddShortcutTile_Click(object sender, MouseButtonEventArgs e)
