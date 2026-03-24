@@ -80,6 +80,7 @@ public partial class MainWindow : Window
     private bool _isVisibilityAnimationRunning;
     private bool _isScrollAnimationRunning;
     private bool _isShortcutDragActive;
+    private bool _isHiddenIdleModeActive;
     private int _shortcutScrollIndex;
     private bool _isAutoStartEnabled;
     private bool _hasCompletedTutorial;
@@ -566,6 +567,7 @@ public partial class MainWindow : Window
     {
         _isVisibilityAnimationRunning = true;
         PositionWindow();
+        ExitHiddenIdleMode();
 
         Show();
         WindowState = WindowState.Normal;
@@ -586,6 +588,7 @@ public partial class MainWindow : Window
         AnimateOrbitCollapse();
         await Task.Delay(GetOrbitAnimationTotalDurationMs(ShortcutOrbitLayer.Children.Count, OrbitExitDurationMs));
         Hide();
+        EnterHiddenIdleMode();
         _isVisibilityAnimationRunning = false;
     }
 
@@ -597,6 +600,7 @@ public partial class MainWindow : Window
         }
 
         Hide();
+        EnterHiddenIdleMode();
     }
 
     private void PositionWindow()
@@ -631,6 +635,49 @@ public partial class MainWindow : Window
     {
         _isExitRequested = true;
         System.Windows.Application.Current.Shutdown();
+    }
+
+    private void EnterHiddenIdleMode()
+    {
+        if (_isHiddenIdleModeActive)
+        {
+            return;
+        }
+
+        ClearDragState();
+        ShortcutOrbitLayer.Children.Clear();
+        CenterSlotNameText.Text = string.Empty;
+        CenterSlotNameText.Visibility = Visibility.Collapsed;
+        _iconCache.Clear();
+        _isHiddenIdleModeActive = true;
+        TrimProcessMemory();
+    }
+
+    private void ExitHiddenIdleMode()
+    {
+        if (!_isHiddenIdleModeActive)
+        {
+            return;
+        }
+
+        _isHiddenIdleModeActive = false;
+    }
+
+    private static void TrimProcessMemory()
+    {
+        try
+        {
+            System.Runtime.GCSettings.LargeObjectHeapCompactionMode = System.Runtime.GCLargeObjectHeapCompactionMode.CompactOnce;
+            GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, blocking: true, compacting: true);
+            GC.WaitForPendingFinalizers();
+            GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, blocking: true, compacting: true);
+
+            using Process currentProcess = Process.GetCurrentProcess();
+            _ = EmptyWorkingSet(currentProcess.Handle);
+        }
+        catch
+        {
+        }
     }
 
     private static Drawing.Icon? LoadApplicationTrayIcon()
@@ -1790,4 +1837,7 @@ public partial class MainWindow : Window
 
     [DllImport("user32.dll", SetLastError = true)]
     private static extern bool UnregisterHotKey(IntPtr hWnd, int id);
+
+    [DllImport("psapi.dll", SetLastError = true)]
+    private static extern bool EmptyWorkingSet(IntPtr hProcess);
 }
