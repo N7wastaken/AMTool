@@ -5,6 +5,7 @@ using System.Diagnostics;
 using System.IO;
 using System.Reflection;
 using System.Runtime.InteropServices;
+using System.Threading;
 using System.Threading.Tasks;
 using System.Text.Json;
 using System.Windows;
@@ -15,7 +16,6 @@ using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using System.Windows.Media.Animation;
 using Drawing = System.Drawing;
-using DrawingImaging = System.Drawing.Imaging;
 using Forms = System.Windows.Forms;
 
 namespace AMTool;
@@ -40,10 +40,13 @@ public partial class MainWindow : Window
     private const double OrbitExitAngle = 24;
     private const int OrbitEntryDurationMs = 320;
     private const int OrbitExitDurationMs = 220;
-    private const int OrbitScrollDurationMs = 220;
+    private const int OrbitScrollDurationMs = 200;
+    private const int OrbitScrollFastDurationMs = OrbitScrollDurationMs / 3;
+    private const int OrbitScrollBurstThresholdMs = 180;
     private const int OrbitSwapDurationMs = 240;
     private const int OrbitAnimationStaggerMs = 34;
     private const int OrbitHoverDurationMs = 140;
+    private const int HiddenIdleCleanupDelayMs = 12000;
     private const double DraggedTileScale = 1.08;
     private const double DragTargetScale = 1.04;
     private const double HoverTileScale = 1.06;
@@ -58,6 +61,12 @@ public partial class MainWindow : Window
         new(520, 52),
         new(664, 152)
     ];
+    private static readonly System.Windows.Media.Brush ShortcutTileBackgroundBrush = CreateFrozenBrush(42, 244, 247, 251);
+    private static readonly System.Windows.Media.Brush ShortcutTileBorderBrush = CreateFrozenBrush(92, 244, 247, 251);
+    private static readonly System.Windows.Media.Brush AddTileBackgroundBrush = CreateFrozenBrush(28, 244, 247, 251);
+    private static readonly System.Windows.Media.Brush AddTileBorderBrush = CreateFrozenBrush(118, 244, 247, 251);
+    private static readonly BitmapSizeOptions ShortcutIconBitmapSizeOptions =
+        BitmapSizeOptions.FromWidthAndHeight((int)ShortcutIconSize, (int)ShortcutIconSize);
 
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
@@ -82,8 +91,13 @@ public partial class MainWindow : Window
     private bool _isShortcutDragActive;
     private bool _isHiddenIdleModeActive;
     private int _shortcutScrollIndex;
+    private int _orbitScrollDirection = 1;
+    private int _orbitScrollInputVersion;
+    private DateTime _lastOrbitScrollInputUtc = DateTime.MinValue;
+    private bool _isOrbitScrollBurstActive;
     private bool _isAutoStartEnabled;
     private bool _hasCompletedTutorial;
+    private CancellationTokenSource? _hiddenIdleCleanupCancellation;
     private ModifierKeys _hotkeyModifiers = ModifierKeys.Control | ModifierKeys.Shift;
     private Key _hotkeyKey = Key.Q;
     private Border? _pressedShortcutTile;
@@ -101,12 +115,12 @@ public partial class MainWindow : Window
 
         SourceInitialized += MainWindow_SourceInitialized;
         Loaded += MainWindow_Loaded;
+        Deactivated += MainWindow_Deactivated;
         Closing += MainWindow_Closing;
         Closed += MainWindow_Closed;
 
         LoadSettings();
         LoadShortcuts();
-        RefreshShortcutStrip();
     }
 
     private void InitializeInfoBadgeInteractions()
@@ -248,6 +262,28 @@ public partial class MainWindow : Window
         }
     }
 
+    private async void MainWindow_Deactivated(object? sender, EventArgs e)
+    {
+        if (_isExitRequested || !IsVisible || _isVisibilityAnimationRunning)
+        {
+            return;
+        }
+
+        await Task.Yield();
+
+        if (_isExitRequested || !IsVisible || _isVisibilityAnimationRunning)
+        {
+            return;
+        }
+
+        if (IsForegroundWindowOwnedByCurrentProcess())
+        {
+            return;
+        }
+
+        await HideToTrayAsync();
+    }
+
     private void MainWindow_Closing(object? sender, CancelEventArgs e)
     {
         if (_isExitRequested)
@@ -261,6 +297,8 @@ public partial class MainWindow : Window
 
     private void MainWindow_Closed(object? sender, EventArgs e)
     {
+        CancelHiddenIdleCleanup();
+
         IntPtr hwnd = new WindowInteropHelper(this).Handle;
 
         if (_isHotkeyRegistered)
@@ -559,7 +597,6 @@ public partial class MainWindow : Window
         }
 
         PositionWindow();
-        RefreshShortcutStrip();
         BringWindowToFront();
     }
 
@@ -631,6 +668,19 @@ public partial class MainWindow : Window
         Topmost = false;
     }
 
+    private static bool IsForegroundWindowOwnedByCurrentProcess()
+    {
+        IntPtr foregroundWindow = GetForegroundWindow();
+
+        if (foregroundWindow == IntPtr.Zero)
+        {
+            return false;
+        }
+
+        _ = GetWindowThreadProcessId(foregroundWindow, out uint processId);
+        return processId == (uint)Environment.ProcessId;
+    }
+
     private void ExitApplication()
     {
         _isExitRequested = true;
@@ -648,19 +698,68 @@ public partial class MainWindow : Window
         ShortcutOrbitLayer.Children.Clear();
         CenterSlotNameText.Text = string.Empty;
         CenterSlotNameText.Visibility = Visibility.Collapsed;
-        _iconCache.Clear();
         _isHiddenIdleModeActive = true;
-        TrimProcessMemory();
+        ScheduleHiddenIdleCleanup();
     }
 
     private void ExitHiddenIdleMode()
     {
+        CancelHiddenIdleCleanup();
+
         if (!_isHiddenIdleModeActive)
         {
             return;
         }
 
         _isHiddenIdleModeActive = false;
+    }
+
+    private void ScheduleHiddenIdleCleanup()
+    {
+        CancelHiddenIdleCleanup();
+        _hiddenIdleCleanupCancellation = new CancellationTokenSource();
+        _ = PerformDeferredHiddenIdleCleanupAsync(_hiddenIdleCleanupCancellation.Token);
+    }
+
+    private void CancelHiddenIdleCleanup()
+    {
+        if (_hiddenIdleCleanupCancellation is null)
+        {
+            return;
+        }
+
+        try
+        {
+            _hiddenIdleCleanupCancellation.Cancel();
+        }
+        catch
+        {
+        }
+        finally
+        {
+            _hiddenIdleCleanupCancellation.Dispose();
+            _hiddenIdleCleanupCancellation = null;
+        }
+    }
+
+    private async Task PerformDeferredHiddenIdleCleanupAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            await Task.Delay(HiddenIdleCleanupDelayMs, cancellationToken);
+        }
+        catch (OperationCanceledException)
+        {
+            return;
+        }
+
+        if (cancellationToken.IsCancellationRequested || !_isHiddenIdleModeActive || IsVisible)
+        {
+            return;
+        }
+
+        _iconCache.Clear();
+        TrimProcessMemory();
     }
 
     private static void TrimProcessMemory()
@@ -918,7 +1017,7 @@ public partial class MainWindow : Window
             last.Y + (last.Y - beforeLast.Y));
     }
 
-    private void AnimateOrbitScroll(int previousScrollIndex, int nextScrollIndex, int scrollDirection)
+    private void AnimateOrbitScroll(int previousScrollIndex, int nextScrollIndex, int scrollDirection, int durationMs)
     {
         List<object?> previousVisibleOrbitItems = GetVisibleOrbitItems(previousScrollIndex);
         List<object?> nextVisibleOrbitItems = GetVisibleOrbitItems(nextScrollIndex);
@@ -952,7 +1051,7 @@ public partial class MainWindow : Window
 
             if (existingTilesByKey.TryGetValue(orbitItemKey, out Border? existingTile))
             {
-                AnimateTileToPosition(existingTile, targetPosition, 1, 1, 0, 0, OrbitScrollDurationMs);
+                AnimateTileToPosition(existingTile, targetPosition, 1, 1, 0, 0, durationMs);
                 continue;
             }
 
@@ -960,7 +1059,7 @@ public partial class MainWindow : Window
             PrepareTileForAnimation(enteringTile);
             SetTileState(enteringTile, entryPoint, 0, 0.86, 0);
             ShortcutOrbitLayer.Children.Add(enteringTile);
-            AnimateTileToPosition(enteringTile, targetPosition, 1, 1, 0, 0, OrbitScrollDurationMs);
+            AnimateTileToPosition(enteringTile, targetPosition, 1, 1, 0, 0, durationMs);
         }
 
         foreach (object? orbitItem in previousVisibleOrbitItems)
@@ -972,7 +1071,67 @@ public partial class MainWindow : Window
                 continue;
             }
 
-            AnimateTileToPosition(exitingTile, exitPoint, 0, OrbitExitScale, 0, 0, OrbitScrollDurationMs);
+            AnimateTileToPosition(exitingTile, exitPoint, 0, OrbitExitScale, 0, 0, durationMs);
+        }
+    }
+
+    private async Task ProcessOrbitScrollAsync()
+    {
+        if (_isScrollAnimationRunning)
+        {
+            return;
+        }
+
+        _isScrollAnimationRunning = true;
+
+        try
+        {
+            while (true)
+            {
+                if (_isVisibilityAnimationRunning || _pressedShortcutTile is not null || !IsVisible)
+                {
+                    return;
+                }
+
+                int totalTileCount = _shortcuts.Count + 1;
+                int maxScrollIndex = GetMaxShortcutScrollIndex(totalTileCount);
+
+                if (maxScrollIndex == 0)
+                {
+                    return;
+                }
+
+                int inputVersionAtStepStart = _orbitScrollInputVersion;
+                int scrollDirection = _orbitScrollDirection;
+                int durationMs = _isOrbitScrollBurstActive ? OrbitScrollFastDurationMs : OrbitScrollDurationMs;
+                int nextScrollIndex = GetLoopedScrollIndex(_shortcutScrollIndex, scrollDirection, maxScrollIndex);
+
+                if (nextScrollIndex == _shortcutScrollIndex)
+                {
+                    return;
+                }
+
+                int previousScrollIndex = _shortcutScrollIndex;
+                _shortcutScrollIndex = nextScrollIndex;
+                AnimateOrbitScroll(previousScrollIndex, nextScrollIndex, scrollDirection, durationMs);
+                await Task.Delay(durationMs);
+                RefreshShortcutStrip();
+
+                bool receivedNewInput = _orbitScrollInputVersion != inputVersionAtStepStart;
+
+                if (!receivedNewInput)
+                {
+                    _isOrbitScrollBurstActive = false;
+                    return;
+                }
+
+                _isOrbitScrollBurstActive =
+                    (DateTime.UtcNow - _lastOrbitScrollInputUtc).TotalMilliseconds <= OrbitScrollBurstThresholdMs;
+            }
+        }
+        finally
+        {
+            _isScrollAnimationRunning = false;
         }
     }
 
@@ -1313,8 +1472,8 @@ public partial class MainWindow : Window
             Width = OrbitTileSize,
             Height = OrbitTileSize,
             CornerRadius = new CornerRadius(OrbitTileCornerRadius),
-            Background = new SolidColorBrush(System.Windows.Media.Color.FromArgb(42, 244, 247, 251)),
-            BorderBrush = new SolidColorBrush(System.Windows.Media.Color.FromArgb(92, 244, 247, 251)),
+            Background = ShortcutTileBackgroundBrush,
+            BorderBrush = ShortcutTileBorderBrush,
             BorderThickness = new Thickness(1.2),
             Child = iconShell,
             Cursor = System.Windows.Input.Cursors.Hand,
@@ -1362,8 +1521,8 @@ public partial class MainWindow : Window
             Width = OrbitTileSize,
             Height = OrbitTileSize,
             CornerRadius = new CornerRadius(OrbitTileCornerRadius),
-            Background = new SolidColorBrush(System.Windows.Media.Color.FromArgb(28, 244, 247, 251)),
-            BorderBrush = new SolidColorBrush(System.Windows.Media.Color.FromArgb(118, 244, 247, 251)),
+            Background = AddTileBackgroundBrush,
+            BorderBrush = AddTileBorderBrush,
             BorderThickness = new Thickness(1.2),
             Child = plusText,
             Cursor = System.Windows.Input.Cursors.Hand,
@@ -1381,7 +1540,7 @@ public partial class MainWindow : Window
 
     private async void OrbitScene_PreviewMouseWheel(object sender, MouseWheelEventArgs e)
     {
-        if (_isVisibilityAnimationRunning || _isScrollAnimationRunning || _pressedShortcutTile is not null)
+        if (_isVisibilityAnimationRunning || _pressedShortcutTile is not null)
         {
             return;
         }
@@ -1395,21 +1554,16 @@ public partial class MainWindow : Window
         }
 
         int scrollDirection = e.Delta < 0 ? 1 : -1;
-        int nextScrollIndex = GetLoopedScrollIndex(_shortcutScrollIndex, scrollDirection, maxScrollIndex);
+        DateTime now = DateTime.UtcNow;
+        bool useFastScroll =
+            (now - _lastOrbitScrollInputUtc).TotalMilliseconds <= OrbitScrollBurstThresholdMs;
 
-        if (nextScrollIndex == _shortcutScrollIndex)
-        {
-            return;
-        }
+        _orbitScrollDirection = scrollDirection;
+        _orbitScrollInputVersion++;
+        _lastOrbitScrollInputUtc = now;
+        _isOrbitScrollBurstActive = useFastScroll;
 
-        int previousScrollIndex = _shortcutScrollIndex;
-
-        _isScrollAnimationRunning = true;
-        _shortcutScrollIndex = nextScrollIndex;
-        AnimateOrbitScroll(previousScrollIndex, nextScrollIndex, scrollDirection);
-        await Task.Delay(OrbitScrollDurationMs);
-        RefreshShortcutStrip();
-        _isScrollAnimationRunning = false;
+        await ProcessOrbitScrollAsync();
         e.Handled = true;
     }
 
@@ -1816,20 +1970,20 @@ public partial class MainWindow : Window
 
     private static ImageSource? CreateBitmapSource(Drawing.Icon icon)
     {
-        using var bitmap = icon.ToBitmap();
-        using var stream = new MemoryStream();
+        BitmapSource image = Imaging.CreateBitmapSourceFromHIcon(
+            icon.Handle,
+            Int32Rect.Empty,
+            ShortcutIconBitmapSizeOptions);
 
-        bitmap.Save(stream, DrawingImaging.ImageFormat.Png);
-        stream.Position = 0;
-
-        var image = new BitmapImage();
-        image.BeginInit();
-        image.CacheOption = BitmapCacheOption.OnLoad;
-        image.StreamSource = stream;
-        image.EndInit();
         image.Freeze();
-
         return image;
+    }
+
+    private static System.Windows.Media.Brush CreateFrozenBrush(byte alpha, byte red, byte green, byte blue)
+    {
+        var brush = new SolidColorBrush(System.Windows.Media.Color.FromArgb(alpha, red, green, blue));
+        brush.Freeze();
+        return brush;
     }
 
     [DllImport("user32.dll", SetLastError = true)]
@@ -1837,6 +1991,12 @@ public partial class MainWindow : Window
 
     [DllImport("user32.dll", SetLastError = true)]
     private static extern bool UnregisterHotKey(IntPtr hWnd, int id);
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr GetForegroundWindow();
+
+    [DllImport("user32.dll")]
+    private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
 
     [DllImport("psapi.dll", SetLastError = true)]
     private static extern bool EmptyWorkingSet(IntPtr hProcess);
