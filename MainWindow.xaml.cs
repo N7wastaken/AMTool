@@ -23,11 +23,24 @@ namespace AMTool;
 public partial class MainWindow : Window
 {
     private const int WM_HOTKEY = 0x0312;
+    private const int WH_MOUSE_LL = 14;
+    private const int WM_LBUTTONDOWN = 0x0201;
+    private const int WM_RBUTTONDOWN = 0x0204;
+    private const int WM_MBUTTONDOWN = 0x0207;
+    private const int WM_XBUTTONDOWN = 0x020B;
     private const int HotkeyIdToggleWindow = 9001;
+    private const int VK_SHIFT = 0x10;
+    private const int VK_CONTROL = 0x11;
+    private const int VK_MENU = 0x12;
+    private const int VK_LWIN = 0x5B;
+    private const int VK_RWIN = 0x5C;
+    private const ushort XButton1 = 0x0001;
+    private const ushort XButton2 = 0x0002;
     private const uint MOD_CONTROL = 0x0002;
     private const uint MOD_SHIFT = 0x0004;
     private const uint MOD_ALT = 0x0001;
     private const uint MOD_WIN = 0x0008;
+    private const uint MOD_NOREPEAT = 0x4000;
     private const double BottomMargin = 24;
     private const int MaxVisibleOrbitTiles = 5;
     private const double OrbitTileSize = 88;
@@ -65,6 +78,9 @@ public partial class MainWindow : Window
     private static readonly System.Windows.Media.Brush ShortcutTileBorderBrush = CreateFrozenBrush(92, 244, 247, 251);
     private static readonly System.Windows.Media.Brush AddTileBackgroundBrush = CreateFrozenBrush(28, 244, 247, 251);
     private static readonly System.Windows.Media.Brush AddTileBorderBrush = CreateFrozenBrush(118, 244, 247, 251);
+    private static readonly BitmapCache OrbitTileBitmapCache = CreateFrozenBitmapCache();
+    private static readonly IEasingFunction OrbitEaseOut = CreateFrozenCubicEase(EasingMode.EaseOut);
+    private static readonly IEasingFunction OrbitEaseIn = CreateFrozenCubicEase(EasingMode.EaseIn);
     private static readonly BitmapSizeOptions ShortcutIconBitmapSizeOptions =
         BitmapSizeOptions.FromWidthAndHeight((int)ShortcutIconSize, (int)ShortcutIconSize);
 
@@ -82,6 +98,8 @@ public partial class MainWindow : Window
     private readonly string _settingsPath;
 
     private HwndSource? _hwndSource;
+    private LowLevelMouseProc? _mouseHookProc;
+    private IntPtr _mouseHookHandle;
     private Forms.NotifyIcon? _trayIcon;
     private Drawing.Icon? _applicationTrayIcon;
     private bool _isExitRequested;
@@ -99,7 +117,9 @@ public partial class MainWindow : Window
     private bool _hasCompletedTutorial;
     private CancellationTokenSource? _hiddenIdleCleanupCancellation;
     private ModifierKeys _hotkeyModifiers = ModifierKeys.Control | ModifierKeys.Shift;
+    private HotkeyInputKind _hotkeyInputKind = HotkeyInputKind.Keyboard;
     private Key _hotkeyKey = Key.Q;
+    private HotkeyMouseButton _hotkeyMouseButton;
     private Border? _pressedShortcutTile;
     private Border? _dragTargetTile;
     private AppShortcutEntry? _pressedShortcut;
@@ -143,10 +163,19 @@ public partial class MainWindow : Window
             string json = File.ReadAllText(_settingsPath);
             AppSettings? settings = JsonSerializer.Deserialize<AppSettings>(json);
 
-            if (settings is not null && HotkeyUtilities.IsValidHotkey(settings.HotkeyModifiers, settings.HotkeyKey))
+            if (settings is not null
+                && HotkeyUtilities.IsValidHotkey(
+                    settings.HotkeyModifiers,
+                    settings.HotkeyKey,
+                    settings.HotkeyInputKind,
+                    settings.HotkeyMouseButton))
             {
                 _hotkeyModifiers = HotkeyUtilities.SanitizeModifiers(settings.HotkeyModifiers);
-                _hotkeyKey = settings.HotkeyKey;
+                _hotkeyInputKind = settings.HotkeyInputKind;
+                _hotkeyKey = settings.HotkeyInputKind == HotkeyInputKind.Keyboard ? settings.HotkeyKey : Key.None;
+                _hotkeyMouseButton = settings.HotkeyInputKind == HotkeyInputKind.MouseButton
+                    ? settings.HotkeyMouseButton
+                    : HotkeyMouseButton.None;
             }
 
             _isAutoStartEnabled = settings?.AutoStartEnabled == true;
@@ -170,7 +199,9 @@ public partial class MainWindow : Window
                 new AppSettings
                 {
                     HotkeyModifiers = _hotkeyModifiers,
+                    HotkeyInputKind = _hotkeyInputKind,
                     HotkeyKey = _hotkeyKey,
+                    HotkeyMouseButton = _hotkeyMouseButton,
                     AutoStartEnabled = _isAutoStartEnabled,
                     HasCompletedTutorial = _hasCompletedTutorial
                 },
@@ -238,7 +269,11 @@ public partial class MainWindow : Window
 
     private string GetCurrentHotkeyText()
     {
-        return HotkeyUtilities.FormatHotkey(_hotkeyModifiers, _hotkeyKey);
+        return HotkeyUtilities.FormatHotkey(
+            _hotkeyModifiers,
+            _hotkeyKey,
+            _hotkeyInputKind,
+            _hotkeyMouseButton);
     }
 
     private void MainWindow_SourceInitialized(object? sender, EventArgs e)
@@ -312,6 +347,13 @@ public partial class MainWindow : Window
             _hwndSource = null;
         }
 
+        if (_mouseHookHandle != IntPtr.Zero)
+        {
+            UnhookWindowsHookEx(_mouseHookHandle);
+            _mouseHookHandle = IntPtr.Zero;
+            _mouseHookProc = null;
+        }
+
         if (_trayIcon is not null)
         {
             _trayIcon.Visible = false;
@@ -328,11 +370,14 @@ public partial class MainWindow : Window
 
     private void RegisterHotkey(IntPtr hwnd)
     {
-        _isHotkeyRegistered = RegisterHotKey(
-            hwnd,
-            HotkeyIdToggleWindow,
-            ToNativeHotkeyModifiers(_hotkeyModifiers),
-            (uint)KeyInterop.VirtualKeyFromKey(_hotkeyKey));
+        if (_hotkeyInputKind == HotkeyInputKind.MouseButton)
+        {
+            _isHotkeyRegistered = false;
+            UpdateMouseHookState();
+            return;
+        }
+
+        _isHotkeyRegistered = TryRegisterKeyboardHotkey(hwnd, _hotkeyModifiers, _hotkeyKey);
 
         if (!_isHotkeyRegistered)
         {
@@ -344,7 +389,7 @@ public partial class MainWindow : Window
         }
     }
 
-    private uint ToNativeHotkeyModifiers(ModifierKeys modifiers)
+    private static uint ToNativeHotkeyModifiers(ModifierKeys modifiers)
     {
         ModifierKeys sanitizedModifiers = HotkeyUtilities.SanitizeModifiers(modifiers);
         uint nativeModifiers = 0;
@@ -369,19 +414,169 @@ public partial class MainWindow : Window
             nativeModifiers |= MOD_WIN;
         }
 
-        return nativeModifiers;
+        return nativeModifiers | MOD_NOREPEAT;
     }
 
-    private bool TryApplyHotkey(ModifierKeys newModifiers, Key newKey)
+    private static bool TryRegisterKeyboardHotkey(IntPtr hwnd, ModifierKeys modifiers, Key key)
     {
-        if (_hwndSource is null || !HotkeyUtilities.IsValidHotkey(newModifiers, newKey))
+        return RegisterHotKey(
+            hwnd,
+            HotkeyIdToggleWindow,
+            ToNativeHotkeyModifiers(modifiers),
+            (uint)KeyInterop.VirtualKeyFromKey(key));
+    }
+
+    private bool EnsureMouseHook()
+    {
+        if (_mouseHookHandle != IntPtr.Zero)
+        {
+            return true;
+        }
+
+        _mouseHookProc = MouseHookCallback;
+
+        using Process currentProcess = Process.GetCurrentProcess();
+        string? moduleName = currentProcess.MainModule?.ModuleName;
+        IntPtr moduleHandle = string.IsNullOrWhiteSpace(moduleName)
+            ? IntPtr.Zero
+            : GetModuleHandle(moduleName);
+
+        _mouseHookHandle = SetWindowsHookEx(WH_MOUSE_LL, _mouseHookProc, moduleHandle, 0);
+        return _mouseHookHandle != IntPtr.Zero;
+    }
+
+    private void ReleaseMouseHook()
+    {
+        if (_mouseHookHandle == IntPtr.Zero)
+        {
+            return;
+        }
+
+        UnhookWindowsHookEx(_mouseHookHandle);
+        _mouseHookHandle = IntPtr.Zero;
+        _mouseHookProc = null;
+    }
+
+    private void UpdateMouseHookState()
+    {
+        bool shouldHookBeActive =
+            !_isExitRequested
+            && _hotkeyInputKind == HotkeyInputKind.MouseButton
+            && !IsVisible;
+
+        if (shouldHookBeActive)
+        {
+            _ = EnsureMouseHook();
+            return;
+        }
+
+        ReleaseMouseHook();
+    }
+
+    private IntPtr MouseHookCallback(int nCode, IntPtr wParam, IntPtr lParam)
+    {
+        if (nCode >= 0)
+        {
+            TryHandleMouseHotkey(wParam, lParam);
+        }
+
+        return CallNextHookEx(_mouseHookHandle, nCode, wParam, lParam);
+    }
+
+    private void TryHandleMouseHotkey(IntPtr wParam, IntPtr lParam)
+    {
+        if (_isExitRequested
+            || _hotkeyInputKind != HotkeyInputKind.MouseButton
+            || _hotkeyMouseButton == HotkeyMouseButton.None
+            || IsForegroundWindowOwnedByCurrentProcess()
+            || !TryGetMouseButtonFromHookMessage(wParam, lParam, out HotkeyMouseButton mouseButton)
+            || mouseButton != _hotkeyMouseButton
+            || HotkeyUtilities.SanitizeModifiers(_hotkeyModifiers) != GetCurrentPressedModifiers())
+        {
+            return;
+        }
+
+        _ = Dispatcher.BeginInvoke(new Action(ToggleWindowVisibility));
+    }
+
+    private static bool TryGetMouseButtonFromHookMessage(IntPtr wParam, IntPtr lParam, out HotkeyMouseButton mouseButton)
+    {
+        switch (wParam.ToInt32())
+        {
+            case WM_LBUTTONDOWN:
+                mouseButton = HotkeyMouseButton.Left;
+                return true;
+            case WM_RBUTTONDOWN:
+                mouseButton = HotkeyMouseButton.Right;
+                return true;
+            case WM_MBUTTONDOWN:
+                mouseButton = HotkeyMouseButton.Middle;
+                return true;
+            case WM_XBUTTONDOWN:
+                MSLLHOOKSTRUCT hookData = Marshal.PtrToStructure<MSLLHOOKSTRUCT>(lParam);
+                ushort xButton = (ushort)((hookData.mouseData >> 16) & 0xFFFF);
+                mouseButton = xButton switch
+                {
+                    XButton1 => HotkeyMouseButton.XButton1,
+                    XButton2 => HotkeyMouseButton.XButton2,
+                    _ => HotkeyMouseButton.None
+                };
+                return mouseButton != HotkeyMouseButton.None;
+            default:
+                mouseButton = HotkeyMouseButton.None;
+                return false;
+        }
+    }
+
+    private static ModifierKeys GetCurrentPressedModifiers()
+    {
+        ModifierKeys modifiers = ModifierKeys.None;
+
+        if (IsVirtualKeyPressed(VK_CONTROL))
+        {
+            modifiers |= ModifierKeys.Control;
+        }
+
+        if (IsVirtualKeyPressed(VK_SHIFT))
+        {
+            modifiers |= ModifierKeys.Shift;
+        }
+
+        if (IsVirtualKeyPressed(VK_MENU))
+        {
+            modifiers |= ModifierKeys.Alt;
+        }
+
+        if (IsVirtualKeyPressed(VK_LWIN) || IsVirtualKeyPressed(VK_RWIN))
+        {
+            modifiers |= ModifierKeys.Windows;
+        }
+
+        return HotkeyUtilities.SanitizeModifiers(modifiers);
+    }
+
+    private static bool IsVirtualKeyPressed(int virtualKey)
+    {
+        return (GetAsyncKeyState(virtualKey) & 0x8000) != 0;
+    }
+
+    private bool TryApplyHotkey(
+        ModifierKeys newModifiers,
+        Key newKey,
+        HotkeyInputKind newInputKind,
+        HotkeyMouseButton newMouseButton)
+    {
+        if (_hwndSource is null
+            || !HotkeyUtilities.IsValidHotkey(newModifiers, newKey, newInputKind, newMouseButton))
         {
             return false;
         }
 
         IntPtr hwnd = new WindowInteropHelper(this).Handle;
         ModifierKeys previousModifiers = _hotkeyModifiers;
+        HotkeyInputKind previousInputKind = _hotkeyInputKind;
         Key previousKey = _hotkeyKey;
+        HotkeyMouseButton previousMouseButton = _hotkeyMouseButton;
 
         if (_isHotkeyRegistered)
         {
@@ -390,30 +585,42 @@ public partial class MainWindow : Window
         }
 
         _hotkeyModifiers = HotkeyUtilities.SanitizeModifiers(newModifiers);
-        _hotkeyKey = newKey;
-        _isHotkeyRegistered = RegisterHotKey(
-            hwnd,
-            HotkeyIdToggleWindow,
-            ToNativeHotkeyModifiers(_hotkeyModifiers),
-            (uint)KeyInterop.VirtualKeyFromKey(_hotkeyKey));
+        _hotkeyInputKind = newInputKind;
+        _hotkeyKey = newInputKind == HotkeyInputKind.Keyboard ? newKey : Key.None;
+        _hotkeyMouseButton = newInputKind == HotkeyInputKind.MouseButton
+            ? newMouseButton
+            : HotkeyMouseButton.None;
 
-        if (_isHotkeyRegistered)
+        bool hotkeyActivated = newInputKind switch
         {
+            HotkeyInputKind.Keyboard => TryRegisterKeyboardHotkey(hwnd, _hotkeyModifiers, _hotkeyKey),
+            HotkeyInputKind.MouseButton => EnsureMouseHook(),
+            _ => false
+        };
+        _isHotkeyRegistered = newInputKind == HotkeyInputKind.Keyboard && hotkeyActivated;
+
+        if (hotkeyActivated)
+        {
+            UpdateMouseHookState();
             SaveSettings();
             UpdateHotkeyUi();
             return true;
         }
 
         _hotkeyModifiers = previousModifiers;
+        _hotkeyInputKind = previousInputKind;
         _hotkeyKey = previousKey;
-        _isHotkeyRegistered = RegisterHotKey(
-            hwnd,
-            HotkeyIdToggleWindow,
-            ToNativeHotkeyModifiers(_hotkeyModifiers),
-            (uint)KeyInterop.VirtualKeyFromKey(_hotkeyKey));
+        _hotkeyMouseButton = previousMouseButton;
+        _isHotkeyRegistered = previousInputKind == HotkeyInputKind.Keyboard
+            && TryRegisterKeyboardHotkey(hwnd, _hotkeyModifiers, _hotkeyKey);
+        UpdateMouseHookState();
+
+        string failureReason = newInputKind == HotkeyInputKind.MouseButton
+            ? "Globalny nasluch myszy nie jest dostepny."
+            : "Ten skrot moze byc juz zajety.";
 
         System.Windows.MessageBox.Show(
-            $"Nie udalo sie ustawic skrotu {HotkeyUtilities.FormatHotkey(newModifiers, newKey)}. Ten skrot moze byc juz zajety.",
+            $"Nie udalo sie ustawic skrotu {HotkeyUtilities.FormatHotkey(newModifiers, newKey, newInputKind, newMouseButton)}. {failureReason}",
             "AMTool",
             MessageBoxButton.OK,
             MessageBoxImage.Warning);
@@ -475,7 +682,12 @@ public partial class MainWindow : Window
 
             try
             {
-                dialog = new SettingsDialog(_hotkeyModifiers, _hotkeyKey, _isAutoStartEnabled)
+                dialog = new SettingsDialog(
+                    _hotkeyModifiers,
+                    _hotkeyKey,
+                    _hotkeyInputKind,
+                    _hotkeyMouseButton,
+                    _isAutoStartEnabled)
                 {
                     Owner = this
                 };
@@ -500,9 +712,18 @@ public partial class MainWindow : Window
                 return;
             }
 
-            bool hotkeyChanged = dialog.SelectedHotkeyModifiers != _hotkeyModifiers || dialog.SelectedHotkeyKey != _hotkeyKey;
+            bool hotkeyChanged =
+                dialog.SelectedHotkeyModifiers != _hotkeyModifiers
+                || dialog.SelectedHotkeyInputKind != _hotkeyInputKind
+                || dialog.SelectedHotkeyKey != _hotkeyKey
+                || dialog.SelectedHotkeyMouseButton != _hotkeyMouseButton;
 
-            if (hotkeyChanged && !TryApplyHotkey(dialog.SelectedHotkeyModifiers, dialog.SelectedHotkeyKey))
+            if (hotkeyChanged
+                && !TryApplyHotkey(
+                    dialog.SelectedHotkeyModifiers,
+                    dialog.SelectedHotkeyKey,
+                    dialog.SelectedHotkeyInputKind,
+                    dialog.SelectedHotkeyMouseButton))
             {
                 continue;
             }
@@ -607,6 +828,7 @@ public partial class MainWindow : Window
         ExitHiddenIdleMode();
 
         Show();
+        UpdateMouseHookState();
         WindowState = WindowState.Normal;
         RefreshShortcutStrip(animateFromCenter: true);
         BringWindowToFront();
@@ -626,6 +848,7 @@ public partial class MainWindow : Window
         await Task.Delay(GetOrbitAnimationTotalDurationMs(ShortcutOrbitLayer.Children.Count, OrbitExitDurationMs));
         Hide();
         EnterHiddenIdleMode();
+        UpdateMouseHookState();
         _isVisibilityAnimationRunning = false;
     }
 
@@ -638,6 +861,7 @@ public partial class MainWindow : Window
 
         Hide();
         EnterHiddenIdleMode();
+        UpdateMouseHookState();
     }
 
     private void PositionWindow()
@@ -1208,18 +1432,17 @@ public partial class MainWindow : Window
         int durationMs)
     {
         TimeSpan delay = TimeSpan.FromMilliseconds(slotIndex * OrbitAnimationStaggerMs);
-        var easing = new CubicEase { EasingMode = EasingMode.EaseOut };
 
-        tile.BeginAnimation(Canvas.LeftProperty, CreateAnimation(targetPosition.X, durationMs, delay, easing));
-        tile.BeginAnimation(Canvas.TopProperty, CreateAnimation(targetPosition.Y, durationMs, delay, easing));
-        tile.BeginAnimation(OpacityProperty, CreateAnimation(targetOpacity, durationMs, delay, easing));
+        tile.BeginAnimation(Canvas.LeftProperty, CreateAnimation(targetPosition.X, durationMs, delay, OrbitEaseOut));
+        tile.BeginAnimation(Canvas.TopProperty, CreateAnimation(targetPosition.Y, durationMs, delay, OrbitEaseOut));
+        tile.BeginAnimation(OpacityProperty, CreateAnimation(targetOpacity, durationMs, delay, OrbitEaseOut));
 
         ScaleTransform scaleTransform = GetTileScaleTransform(tile);
-        scaleTransform.BeginAnimation(ScaleTransform.ScaleXProperty, CreateAnimation(targetScale, durationMs, delay, easing));
-        scaleTransform.BeginAnimation(ScaleTransform.ScaleYProperty, CreateAnimation(targetScale, durationMs, delay, easing));
+        scaleTransform.BeginAnimation(ScaleTransform.ScaleXProperty, CreateAnimation(targetScale, durationMs, delay, OrbitEaseOut));
+        scaleTransform.BeginAnimation(ScaleTransform.ScaleYProperty, CreateAnimation(targetScale, durationMs, delay, OrbitEaseOut));
 
         RotateTransform rotateTransform = GetTileRotateTransform(tile);
-        rotateTransform.BeginAnimation(RotateTransform.AngleProperty, CreateAnimation(targetAngle, durationMs, delay, easing));
+        rotateTransform.BeginAnimation(RotateTransform.AngleProperty, CreateAnimation(targetAngle, durationMs, delay, OrbitEaseOut));
     }
 
     private static DoubleAnimation CreateAnimation(double toValue, int durationMs, TimeSpan delay, IEasingFunction easing)
@@ -1240,10 +1463,16 @@ public partial class MainWindow : Window
 
     private void AnimateTileScale(Border tile, double targetScale, int durationMs)
     {
-        var easing = new CubicEase { EasingMode = EasingMode.EaseOut };
         ScaleTransform scaleTransform = GetTileScaleTransform(tile);
-        scaleTransform.BeginAnimation(ScaleTransform.ScaleXProperty, CreateAnimation(targetScale, durationMs, TimeSpan.Zero, easing));
-        scaleTransform.BeginAnimation(ScaleTransform.ScaleYProperty, CreateAnimation(targetScale, durationMs, TimeSpan.Zero, easing));
+
+        if (Math.Abs(scaleTransform.ScaleX - targetScale) < 0.001
+            && Math.Abs(scaleTransform.ScaleY - targetScale) < 0.001)
+        {
+            return;
+        }
+
+        scaleTransform.BeginAnimation(ScaleTransform.ScaleXProperty, CreateAnimation(targetScale, durationMs, TimeSpan.Zero, OrbitEaseOut));
+        scaleTransform.BeginAnimation(ScaleTransform.ScaleYProperty, CreateAnimation(targetScale, durationMs, TimeSpan.Zero, OrbitEaseOut));
     }
 
     private static System.Windows.Controls.ToolTip CreateTileTooltip(string text)
@@ -1251,8 +1480,8 @@ public partial class MainWindow : Window
         return new System.Windows.Controls.ToolTip
         {
             Content = text,
-            Placement = System.Windows.Controls.Primitives.PlacementMode.Mouse,
-            HasDropShadow = true
+            Placement = System.Windows.Controls.Primitives.PlacementMode.Bottom,
+            HasDropShadow = false
         };
     }
 
@@ -1410,18 +1639,17 @@ public partial class MainWindow : Window
                 : OrbitExitAngle;
 
             TimeSpan delay = TimeSpan.FromMilliseconds(index * OrbitAnimationStaggerMs);
-            var easing = new CubicEase { EasingMode = EasingMode.EaseIn };
 
-            tile.BeginAnimation(Canvas.LeftProperty, CreateAnimation(collapsePoint.X, OrbitExitDurationMs, delay, easing));
-            tile.BeginAnimation(Canvas.TopProperty, CreateAnimation(collapsePoint.Y, OrbitExitDurationMs, delay, easing));
-            tile.BeginAnimation(OpacityProperty, CreateAnimation(0, OrbitExitDurationMs, delay, easing));
+            tile.BeginAnimation(Canvas.LeftProperty, CreateAnimation(collapsePoint.X, OrbitExitDurationMs, delay, OrbitEaseIn));
+            tile.BeginAnimation(Canvas.TopProperty, CreateAnimation(collapsePoint.Y, OrbitExitDurationMs, delay, OrbitEaseIn));
+            tile.BeginAnimation(OpacityProperty, CreateAnimation(0, OrbitExitDurationMs, delay, OrbitEaseIn));
 
             ScaleTransform scaleTransform = GetTileScaleTransform(tile);
-            scaleTransform.BeginAnimation(ScaleTransform.ScaleXProperty, CreateAnimation(OrbitExitScale, OrbitExitDurationMs, delay, easing));
-            scaleTransform.BeginAnimation(ScaleTransform.ScaleYProperty, CreateAnimation(OrbitExitScale, OrbitExitDurationMs, delay, easing));
+            scaleTransform.BeginAnimation(ScaleTransform.ScaleXProperty, CreateAnimation(OrbitExitScale, OrbitExitDurationMs, delay, OrbitEaseIn));
+            scaleTransform.BeginAnimation(ScaleTransform.ScaleYProperty, CreateAnimation(OrbitExitScale, OrbitExitDurationMs, delay, OrbitEaseIn));
 
             RotateTransform rotateTransform = GetTileRotateTransform(tile);
-            rotateTransform.BeginAnimation(RotateTransform.AngleProperty, CreateAnimation(angle, OrbitExitDurationMs, delay, easing));
+            rotateTransform.BeginAnimation(RotateTransform.AngleProperty, CreateAnimation(angle, OrbitExitDurationMs, delay, OrbitEaseIn));
         }
     }
 
@@ -1479,10 +1707,11 @@ public partial class MainWindow : Window
             Cursor = System.Windows.Input.Cursors.Hand,
             Uid = BuildOrbitItemKey(shortcut),
             Tag = shortcut,
+            CacheMode = OrbitTileBitmapCache,
             ToolTip = CreateTileTooltip(shortcut.DisplayName)
         };
 
-        ToolTipService.SetInitialShowDelay(border, 120);
+        ToolTipService.SetInitialShowDelay(border, 280);
         ToolTipService.SetShowDuration(border, 4000);
 
         var contextMenu = new ContextMenu();
@@ -1527,10 +1756,11 @@ public partial class MainWindow : Window
             Child = plusText,
             Cursor = System.Windows.Input.Cursors.Hand,
             Uid = AddOrbitItemKey,
+            CacheMode = OrbitTileBitmapCache,
             ToolTip = CreateTileTooltip("Dodaj skrot")
         };
 
-        ToolTipService.SetInitialShowDelay(border, 120);
+        ToolTipService.SetInitialShowDelay(border, 280);
         ToolTipService.SetShowDuration(border, 3000);
         border.MouseEnter += AddTile_MouseEnter;
         border.MouseLeave += AddTile_MouseLeave;
@@ -1986,17 +2216,68 @@ public partial class MainWindow : Window
         return brush;
     }
 
+    private static BitmapCache CreateFrozenBitmapCache()
+    {
+        var bitmapCache = new BitmapCache();
+        bitmapCache.Freeze();
+        return bitmapCache;
+    }
+
+    private static IEasingFunction CreateFrozenCubicEase(EasingMode easingMode)
+    {
+        var easing = new CubicEase
+        {
+            EasingMode = easingMode
+        };
+        easing.Freeze();
+        return easing;
+    }
+
+    private delegate IntPtr LowLevelMouseProc(int nCode, IntPtr wParam, IntPtr lParam);
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct POINT
+    {
+        public int X;
+        public int Y;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct MSLLHOOKSTRUCT
+    {
+        public POINT pt;
+        public uint mouseData;
+        public uint flags;
+        public uint time;
+        public IntPtr dwExtraInfo;
+    }
+
     [DllImport("user32.dll", SetLastError = true)]
     private static extern bool RegisterHotKey(IntPtr hWnd, int id, uint fsModifiers, uint vk);
 
     [DllImport("user32.dll", SetLastError = true)]
     private static extern bool UnregisterHotKey(IntPtr hWnd, int id);
 
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern IntPtr SetWindowsHookEx(int idHook, LowLevelMouseProc lpfn, IntPtr hMod, uint dwThreadId);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool UnhookWindowsHookEx(IntPtr hhk);
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr CallNextHookEx(IntPtr hhk, int nCode, IntPtr wParam, IntPtr lParam);
+
     [DllImport("user32.dll")]
     private static extern IntPtr GetForegroundWindow();
 
     [DllImport("user32.dll")]
     private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
+
+    [DllImport("user32.dll")]
+    private static extern short GetAsyncKeyState(int vKey);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Auto, SetLastError = true)]
+    private static extern IntPtr GetModuleHandle(string? lpModuleName);
 
     [DllImport("psapi.dll", SetLastError = true)]
     private static extern bool EmptyWorkingSet(IntPtr hProcess);

@@ -12,12 +12,22 @@ public sealed class HotkeyCaptureDialog : Window
 
     public ModifierKeys SelectedModifiers { get; private set; }
 
+    public HotkeyInputKind SelectedInputKind { get; private set; }
+
     public Key SelectedKey { get; private set; }
 
-    public HotkeyCaptureDialog(ModifierKeys currentModifiers, Key currentKey)
+    public HotkeyMouseButton SelectedMouseButton { get; private set; }
+
+    public HotkeyCaptureDialog(
+        ModifierKeys currentModifiers,
+        Key currentKey,
+        HotkeyInputKind currentInputKind,
+        HotkeyMouseButton currentMouseButton)
     {
         SelectedModifiers = currentModifiers;
         SelectedKey = currentKey;
+        SelectedInputKind = currentInputKind;
+        SelectedMouseButton = currentMouseButton;
 
         Title = "Ustaw skrot wywolywania";
         Width = 860;
@@ -29,6 +39,7 @@ public sealed class HotkeyCaptureDialog : Window
         ShowInTaskbar = false;
 
         PreviewKeyDown += HotkeyCaptureDialog_PreviewKeyDown;
+        PreviewMouseDown += HotkeyCaptureDialog_PreviewMouseDown;
         Loaded += (_, _) => Keyboard.Focus(this);
 
         var root = new Grid
@@ -42,7 +53,7 @@ public sealed class HotkeyCaptureDialog : Window
 
         root.Children.Add(new TextBlock
         {
-            Text = "Nacisnij nowa kombinacje klawiszy dla panelu.",
+            Text = "Nacisnij klawisz, przycisk myszy albo kombinacje dla panelu.",
             FontSize = 20,
             FontWeight = FontWeights.SemiBold
         });
@@ -50,7 +61,7 @@ public sealed class HotkeyCaptureDialog : Window
         var helperText = new TextBlock
         {
             Margin = new Thickness(0, 12, 0, 0),
-            Text = "Wymagany jest co najmniej jeden modyfikator: Ctrl, Shift, Alt albo Win.",
+            Text = "Mozesz ustawic klawisz, kombinacje albo przycisk myszy. Lepiej unikac inputow, ktorych stale uzywasz w innych programach.",
             TextWrapping = TextWrapping.Wrap,
             FontSize = 15,
             Foreground = new SolidColorBrush(System.Windows.Media.Color.FromRgb(180, 196, 211))
@@ -79,7 +90,11 @@ public sealed class HotkeyCaptureDialog : Window
             VerticalAlignment = System.Windows.VerticalAlignment.Center,
             TextAlignment = TextAlignment.Center,
             TextWrapping = TextWrapping.Wrap,
-            Text = HotkeyUtilities.FormatHotkey(SelectedModifiers, SelectedKey)
+            Text = HotkeyUtilities.FormatHotkey(
+                SelectedModifiers,
+                SelectedKey,
+                SelectedInputKind,
+                SelectedMouseButton)
         };
         previewBorder.Child = _selectionText;
 
@@ -188,7 +203,7 @@ public sealed class HotkeyCaptureDialog : Window
         if (HotkeyUtilities.IsModifierOnlyKey(capturedKey))
         {
             _selectionText.Text = modifiers == ModifierKeys.None
-                ? "Nacisnij kombinacje"
+                ? "Nacisnij klawisz, przycisk myszy lub kombinacje"
                 : $"{HotkeyUtilities.FormatHotkey(modifiers, Key.None)}+...";
             _confirmButton.IsEnabled = false;
             e.Handled = true;
@@ -196,14 +211,68 @@ public sealed class HotkeyCaptureDialog : Window
         }
 
         SelectedModifiers = modifiers;
+        SelectedInputKind = HotkeyInputKind.Keyboard;
         SelectedKey = capturedKey;
+        SelectedMouseButton = HotkeyMouseButton.None;
         UpdateSelectionState();
         e.Handled = true;
     }
 
+    private void HotkeyCaptureDialog_PreviewMouseDown(object sender, MouseButtonEventArgs e)
+    {
+        if (ShouldIgnoreMouseCapture(e.OriginalSource as DependencyObject))
+        {
+            return;
+        }
+
+        HotkeyMouseButton? mouseButton = HotkeyUtilities.ToHotkeyMouseButton(e.ChangedButton);
+
+        if (mouseButton is null)
+        {
+            return;
+        }
+
+        SelectedModifiers = HotkeyUtilities.SanitizeModifiers(Keyboard.Modifiers);
+        SelectedInputKind = HotkeyInputKind.MouseButton;
+        SelectedKey = Key.None;
+        SelectedMouseButton = mouseButton.Value;
+        UpdateSelectionState();
+        e.Handled = true;
+    }
+
+    private static bool ShouldIgnoreMouseCapture(DependencyObject? source)
+    {
+        DependencyObject? current = source;
+
+        while (current is not null)
+        {
+            if (current is System.Windows.Controls.Button)
+            {
+                return true;
+            }
+
+            current = current switch
+            {
+                Visual or System.Windows.Media.Media3D.Visual3D => VisualTreeHelper.GetParent(current),
+                FrameworkContentElement frameworkContentElement => frameworkContentElement.Parent,
+                _ => LogicalTreeHelper.GetParent(current)
+            };
+        }
+
+        return false;
+    }
+
     private void UpdateSelectionState()
     {
-        _selectionText.Text = HotkeyUtilities.FormatHotkey(SelectedModifiers, SelectedKey);
-        _confirmButton.IsEnabled = HotkeyUtilities.IsValidHotkey(SelectedModifiers, SelectedKey);
+        _selectionText.Text = HotkeyUtilities.FormatHotkey(
+            SelectedModifiers,
+            SelectedKey,
+            SelectedInputKind,
+            SelectedMouseButton);
+        _confirmButton.IsEnabled = HotkeyUtilities.IsValidHotkey(
+            SelectedModifiers,
+            SelectedKey,
+            SelectedInputKind,
+            SelectedMouseButton);
     }
 }
