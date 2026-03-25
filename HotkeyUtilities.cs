@@ -15,33 +15,10 @@ internal static class HotkeyUtilities
 
     internal static bool IsValidHotkey(ModifierKeys modifiers, Key key)
     {
-        return IsValidHotkey(modifiers, key, HotkeyInputKind.Keyboard, HotkeyMouseButton.None);
-    }
-
-    internal static bool IsValidHotkey(
-        ModifierKeys modifiers,
-        Key key,
-        HotkeyInputKind inputKind,
-        HotkeyMouseButton mouseButton)
-    {
-        return inputKind switch
-        {
-            HotkeyInputKind.Keyboard => !IsModifierOnlyKey(key) && key != Key.None,
-            HotkeyInputKind.MouseButton => mouseButton != HotkeyMouseButton.None,
-            _ => false
-        };
+        return !IsModifierOnlyKey(key) && key != Key.None;
     }
 
     internal static string FormatHotkey(ModifierKeys modifiers, Key key)
-    {
-        return FormatHotkey(modifiers, key, HotkeyInputKind.Keyboard, HotkeyMouseButton.None);
-    }
-
-    internal static string FormatHotkey(
-        ModifierKeys modifiers,
-        Key key,
-        HotkeyInputKind inputKind,
-        HotkeyMouseButton mouseButton)
     {
         var parts = new List<string>(5);
         ModifierKeys sanitizedModifiers = SanitizeModifiers(modifiers);
@@ -66,16 +43,9 @@ internal static class HotkeyUtilities
             parts.Add("Win");
         }
 
-        string triggerLabel = inputKind switch
+        if (key != Key.None)
         {
-            HotkeyInputKind.Keyboard when key != Key.None => GetKeyLabel(key),
-            HotkeyInputKind.MouseButton when mouseButton != HotkeyMouseButton.None => GetMouseButtonLabel(mouseButton),
-            _ => string.Empty
-        };
-
-        if (!string.IsNullOrWhiteSpace(triggerLabel))
-        {
-            parts.Add(triggerLabel);
+            parts.Add(GetKeyLabel(key));
         }
 
         return parts.Count == 0 ? "Brak" : string.Join("+", parts);
@@ -106,31 +76,5 @@ internal static class HotkeyUtilities
             or Key.LWin
             or Key.RWin
             or Key.System;
-    }
-
-    internal static string GetMouseButtonLabel(HotkeyMouseButton mouseButton)
-    {
-        return mouseButton switch
-        {
-            HotkeyMouseButton.Left => "LPM",
-            HotkeyMouseButton.Right => "PPM",
-            HotkeyMouseButton.Middle => "Srodkowy",
-            HotkeyMouseButton.XButton1 => "Mouse4",
-            HotkeyMouseButton.XButton2 => "Mouse5",
-            _ => string.Empty
-        };
-    }
-
-    internal static HotkeyMouseButton? ToHotkeyMouseButton(MouseButton mouseButton)
-    {
-        return mouseButton switch
-        {
-            MouseButton.Left => HotkeyMouseButton.Left,
-            MouseButton.Right => HotkeyMouseButton.Right,
-            MouseButton.Middle => HotkeyMouseButton.Middle,
-            MouseButton.XButton1 => HotkeyMouseButton.XButton1,
-            MouseButton.XButton2 => HotkeyMouseButton.XButton2,
-            _ => null
-        };
     }
 }

@@ -12,25 +12,14 @@ public sealed class SettingsDialog : Window
 
     public ModifierKeys SelectedHotkeyModifiers { get; private set; }
 
-    public HotkeyInputKind SelectedHotkeyInputKind { get; private set; }
-
     public Key SelectedHotkeyKey { get; private set; }
-
-    public HotkeyMouseButton SelectedHotkeyMouseButton { get; private set; }
 
     public bool AutoStartEnabled => _autoStartCheckBox.IsChecked == true;
 
-    public SettingsDialog(
-        ModifierKeys currentModifiers,
-        Key currentKey,
-        HotkeyInputKind currentInputKind,
-        HotkeyMouseButton currentMouseButton,
-        bool autoStartEnabled)
+    public SettingsDialog(ModifierKeys currentModifiers, Key currentKey, bool autoStartEnabled)
     {
         SelectedHotkeyModifiers = currentModifiers;
         SelectedHotkeyKey = currentKey;
-        SelectedHotkeyInputKind = currentInputKind;
-        SelectedHotkeyMouseButton = currentMouseButton;
 
         Title = "Ustawienia";
         Width = 900;
@@ -211,11 +200,7 @@ public sealed class SettingsDialog : Window
     {
         try
         {
-            var dialog = new HotkeyCaptureDialog(
-                SelectedHotkeyModifiers,
-                SelectedHotkeyKey,
-                SelectedHotkeyInputKind,
-                SelectedHotkeyMouseButton)
+            var dialog = new HotkeyCaptureDialog(SelectedHotkeyModifiers, SelectedHotkeyKey)
             {
                 Owner = this
             };
@@ -227,8 +212,6 @@ public sealed class SettingsDialog : Window
 
             SelectedHotkeyModifiers = dialog.SelectedModifiers;
             SelectedHotkeyKey = dialog.SelectedKey;
-            SelectedHotkeyInputKind = dialog.SelectedInputKind;
-            SelectedHotkeyMouseButton = dialog.SelectedMouseButton;
             UpdateHotkeyPreview();
         }
         catch
@@ -243,11 +226,7 @@ public sealed class SettingsDialog : Window
 
     private void UpdateHotkeyPreview()
     {
-        _hotkeyValueText.Text = HotkeyUtilities.FormatHotkey(
-            SelectedHotkeyModifiers,
-            SelectedHotkeyKey,
-            SelectedHotkeyInputKind,
-            SelectedHotkeyMouseButton);
+        _hotkeyValueText.Text = HotkeyUtilities.FormatHotkey(SelectedHotkeyModifiers, SelectedHotkeyKey);
     }
 
     private static Style CreateDialogButtonStyle(bool isPrimary)

@@ -23,19 +23,7 @@ namespace AMTool;
 public partial class MainWindow : Window
 {
     private const int WM_HOTKEY = 0x0312;
-    private const int WH_MOUSE_LL = 14;
-    private const int WM_LBUTTONDOWN = 0x0201;
-    private const int WM_RBUTTONDOWN = 0x0204;
-    private const int WM_MBUTTONDOWN = 0x0207;
-    private const int WM_XBUTTONDOWN = 0x020B;
     private const int HotkeyIdToggleWindow = 9001;
-    private const int VK_SHIFT = 0x10;
-    private const int VK_CONTROL = 0x11;
-    private const int VK_MENU = 0x12;
-    private const int VK_LWIN = 0x5B;
-    private const int VK_RWIN = 0x5C;
-    private const ushort XButton1 = 0x0001;
-    private const ushort XButton2 = 0x0002;
     private const uint MOD_CONTROL = 0x0002;
     private const uint MOD_SHIFT = 0x0004;
     private const uint MOD_ALT = 0x0001;
@@ -58,7 +46,6 @@ public partial class MainWindow : Window
     private const int OrbitScrollBurstThresholdMs = 180;
     private const int OrbitSwapDurationMs = 240;
     private const int OrbitAnimationStaggerMs = 34;
-    private const int OrbitHoverDurationMs = 140;
     private const int HiddenIdleCleanupDelayMs = 12000;
     private const double DraggedTileScale = 1.08;
     private const double DragTargetScale = 1.04;
@@ -98,8 +85,6 @@ public partial class MainWindow : Window
     private readonly string _settingsPath;
 
     private HwndSource? _hwndSource;
-    private LowLevelMouseProc? _mouseHookProc;
-    private IntPtr _mouseHookHandle;
     private Forms.NotifyIcon? _trayIcon;
     private Drawing.Icon? _applicationTrayIcon;
     private bool _isExitRequested;
@@ -115,12 +100,14 @@ public partial class MainWindow : Window
     private bool _isOrbitScrollBurstActive;
     private bool _isAutoStartEnabled;
     private bool _hasCompletedTutorial;
+    private bool _hideRequestedAfterVisibilityAnimation;
+    private int _blockingInteractionDepth;
+    private int _isVisibilityToggleRequestQueued;
     private CancellationTokenSource? _hiddenIdleCleanupCancellation;
     private ModifierKeys _hotkeyModifiers = ModifierKeys.Control | ModifierKeys.Shift;
-    private HotkeyInputKind _hotkeyInputKind = HotkeyInputKind.Keyboard;
     private Key _hotkeyKey = Key.Q;
-    private HotkeyMouseButton _hotkeyMouseButton;
     private Border? _pressedShortcutTile;
+    private Border? _hoveredTile;
     private Border? _dragTargetTile;
     private AppShortcutEntry? _pressedShortcut;
     private System.Windows.Point _dragStartPointerPosition;
@@ -164,18 +151,10 @@ public partial class MainWindow : Window
             AppSettings? settings = JsonSerializer.Deserialize<AppSettings>(json);
 
             if (settings is not null
-                && HotkeyUtilities.IsValidHotkey(
-                    settings.HotkeyModifiers,
-                    settings.HotkeyKey,
-                    settings.HotkeyInputKind,
-                    settings.HotkeyMouseButton))
+                && HotkeyUtilities.IsValidHotkey(settings.HotkeyModifiers, settings.HotkeyKey))
             {
                 _hotkeyModifiers = HotkeyUtilities.SanitizeModifiers(settings.HotkeyModifiers);
-                _hotkeyInputKind = settings.HotkeyInputKind;
-                _hotkeyKey = settings.HotkeyInputKind == HotkeyInputKind.Keyboard ? settings.HotkeyKey : Key.None;
-                _hotkeyMouseButton = settings.HotkeyInputKind == HotkeyInputKind.MouseButton
-                    ? settings.HotkeyMouseButton
-                    : HotkeyMouseButton.None;
+                _hotkeyKey = settings.HotkeyKey;
             }
 
             _isAutoStartEnabled = settings?.AutoStartEnabled == true;
@@ -199,9 +178,7 @@ public partial class MainWindow : Window
                 new AppSettings
                 {
                     HotkeyModifiers = _hotkeyModifiers,
-                    HotkeyInputKind = _hotkeyInputKind,
                     HotkeyKey = _hotkeyKey,
-                    HotkeyMouseButton = _hotkeyMouseButton,
                     AutoStartEnabled = _isAutoStartEnabled,
                     HasCompletedTutorial = _hasCompletedTutorial
                 },
@@ -225,6 +202,7 @@ public partial class MainWindow : Window
 
         try
         {
+            _blockingInteractionDepth++;
             result = dialog.ShowDialog();
             return true;
         }
@@ -237,6 +215,10 @@ public partial class MainWindow : Window
                 MessageBoxImage.Warning);
             return false;
         }
+        finally
+        {
+            _blockingInteractionDepth = Math.Max(0, _blockingInteractionDepth - 1);
+        }
     }
 
     private bool TryShowFileDialog(Microsoft.Win32.OpenFileDialog dialog, out bool? result)
@@ -245,6 +227,7 @@ public partial class MainWindow : Window
 
         try
         {
+            _blockingInteractionDepth++;
             result = dialog.ShowDialog(this);
             return true;
         }
@@ -256,6 +239,10 @@ public partial class MainWindow : Window
                 MessageBoxButton.OK,
                 MessageBoxImage.Warning);
             return false;
+        }
+        finally
+        {
+            _blockingInteractionDepth = Math.Max(0, _blockingInteractionDepth - 1);
         }
     }
 
@@ -269,11 +256,7 @@ public partial class MainWindow : Window
 
     private string GetCurrentHotkeyText()
     {
-        return HotkeyUtilities.FormatHotkey(
-            _hotkeyModifiers,
-            _hotkeyKey,
-            _hotkeyInputKind,
-            _hotkeyMouseButton);
+        return HotkeyUtilities.FormatHotkey(_hotkeyModifiers, _hotkeyKey);
     }
 
     private void MainWindow_SourceInitialized(object? sender, EventArgs e)
@@ -299,19 +282,48 @@ public partial class MainWindow : Window
 
     private async void MainWindow_Deactivated(object? sender, EventArgs e)
     {
-        if (_isExitRequested || !IsVisible || _isVisibilityAnimationRunning)
+        if (_isExitRequested || !IsVisible)
         {
             return;
         }
 
-        await Task.Yield();
+        if (WindowVisibilityUtilities.ShouldDeferHideUntilAnimationCompletes(_isVisibilityAnimationRunning))
+        {
+            _hideRequestedAfterVisibilityAnimation = true;
+            return;
+        }
 
-        if (_isExitRequested || !IsVisible || _isVisibilityAnimationRunning)
+        await Task.Delay(40);
+
+        if (_isExitRequested || !IsVisible || IsActive)
         {
             return;
         }
 
-        if (IsForegroundWindowOwnedByCurrentProcess())
+        if (WindowVisibilityUtilities.ShouldDeferHideUntilAnimationCompletes(_isVisibilityAnimationRunning))
+        {
+            _hideRequestedAfterVisibilityAnimation = true;
+            return;
+        }
+
+        if (_blockingInteractionDepth > 0)
+        {
+            return;
+        }
+
+        if (IsAnyShortcutContextMenuOpen())
+        {
+            _hideRequestedAfterVisibilityAnimation = true;
+            return;
+        }
+
+        if (!WindowVisibilityUtilities.CanHideAfterDeactivation(
+                _isExitRequested,
+                IsVisible,
+                IsActive,
+                _isVisibilityAnimationRunning,
+                _blockingInteractionDepth,
+                isAnyShortcutContextMenuOpen: false))
         {
             return;
         }
@@ -347,13 +359,6 @@ public partial class MainWindow : Window
             _hwndSource = null;
         }
 
-        if (_mouseHookHandle != IntPtr.Zero)
-        {
-            UnhookWindowsHookEx(_mouseHookHandle);
-            _mouseHookHandle = IntPtr.Zero;
-            _mouseHookProc = null;
-        }
-
         if (_trayIcon is not null)
         {
             _trayIcon.Visible = false;
@@ -370,13 +375,6 @@ public partial class MainWindow : Window
 
     private void RegisterHotkey(IntPtr hwnd)
     {
-        if (_hotkeyInputKind == HotkeyInputKind.MouseButton)
-        {
-            _isHotkeyRegistered = false;
-            UpdateMouseHookState();
-            return;
-        }
-
         _isHotkeyRegistered = TryRegisterKeyboardHotkey(hwnd, _hotkeyModifiers, _hotkeyKey);
 
         if (!_isHotkeyRegistered)
@@ -426,157 +424,16 @@ public partial class MainWindow : Window
             (uint)KeyInterop.VirtualKeyFromKey(key));
     }
 
-    private bool EnsureMouseHook()
+    private bool TryApplyHotkey(ModifierKeys newModifiers, Key newKey)
     {
-        if (_mouseHookHandle != IntPtr.Zero)
-        {
-            return true;
-        }
-
-        _mouseHookProc = MouseHookCallback;
-
-        using Process currentProcess = Process.GetCurrentProcess();
-        string? moduleName = currentProcess.MainModule?.ModuleName;
-        IntPtr moduleHandle = string.IsNullOrWhiteSpace(moduleName)
-            ? IntPtr.Zero
-            : GetModuleHandle(moduleName);
-
-        _mouseHookHandle = SetWindowsHookEx(WH_MOUSE_LL, _mouseHookProc, moduleHandle, 0);
-        return _mouseHookHandle != IntPtr.Zero;
-    }
-
-    private void ReleaseMouseHook()
-    {
-        if (_mouseHookHandle == IntPtr.Zero)
-        {
-            return;
-        }
-
-        UnhookWindowsHookEx(_mouseHookHandle);
-        _mouseHookHandle = IntPtr.Zero;
-        _mouseHookProc = null;
-    }
-
-    private void UpdateMouseHookState()
-    {
-        bool shouldHookBeActive =
-            !_isExitRequested
-            && _hotkeyInputKind == HotkeyInputKind.MouseButton
-            && !IsVisible;
-
-        if (shouldHookBeActive)
-        {
-            _ = EnsureMouseHook();
-            return;
-        }
-
-        ReleaseMouseHook();
-    }
-
-    private IntPtr MouseHookCallback(int nCode, IntPtr wParam, IntPtr lParam)
-    {
-        if (nCode >= 0)
-        {
-            TryHandleMouseHotkey(wParam, lParam);
-        }
-
-        return CallNextHookEx(_mouseHookHandle, nCode, wParam, lParam);
-    }
-
-    private void TryHandleMouseHotkey(IntPtr wParam, IntPtr lParam)
-    {
-        if (_isExitRequested
-            || _hotkeyInputKind != HotkeyInputKind.MouseButton
-            || _hotkeyMouseButton == HotkeyMouseButton.None
-            || IsForegroundWindowOwnedByCurrentProcess()
-            || !TryGetMouseButtonFromHookMessage(wParam, lParam, out HotkeyMouseButton mouseButton)
-            || mouseButton != _hotkeyMouseButton
-            || HotkeyUtilities.SanitizeModifiers(_hotkeyModifiers) != GetCurrentPressedModifiers())
-        {
-            return;
-        }
-
-        _ = Dispatcher.BeginInvoke(new Action(ToggleWindowVisibility));
-    }
-
-    private static bool TryGetMouseButtonFromHookMessage(IntPtr wParam, IntPtr lParam, out HotkeyMouseButton mouseButton)
-    {
-        switch (wParam.ToInt32())
-        {
-            case WM_LBUTTONDOWN:
-                mouseButton = HotkeyMouseButton.Left;
-                return true;
-            case WM_RBUTTONDOWN:
-                mouseButton = HotkeyMouseButton.Right;
-                return true;
-            case WM_MBUTTONDOWN:
-                mouseButton = HotkeyMouseButton.Middle;
-                return true;
-            case WM_XBUTTONDOWN:
-                MSLLHOOKSTRUCT hookData = Marshal.PtrToStructure<MSLLHOOKSTRUCT>(lParam);
-                ushort xButton = (ushort)((hookData.mouseData >> 16) & 0xFFFF);
-                mouseButton = xButton switch
-                {
-                    XButton1 => HotkeyMouseButton.XButton1,
-                    XButton2 => HotkeyMouseButton.XButton2,
-                    _ => HotkeyMouseButton.None
-                };
-                return mouseButton != HotkeyMouseButton.None;
-            default:
-                mouseButton = HotkeyMouseButton.None;
-                return false;
-        }
-    }
-
-    private static ModifierKeys GetCurrentPressedModifiers()
-    {
-        ModifierKeys modifiers = ModifierKeys.None;
-
-        if (IsVirtualKeyPressed(VK_CONTROL))
-        {
-            modifiers |= ModifierKeys.Control;
-        }
-
-        if (IsVirtualKeyPressed(VK_SHIFT))
-        {
-            modifiers |= ModifierKeys.Shift;
-        }
-
-        if (IsVirtualKeyPressed(VK_MENU))
-        {
-            modifiers |= ModifierKeys.Alt;
-        }
-
-        if (IsVirtualKeyPressed(VK_LWIN) || IsVirtualKeyPressed(VK_RWIN))
-        {
-            modifiers |= ModifierKeys.Windows;
-        }
-
-        return HotkeyUtilities.SanitizeModifiers(modifiers);
-    }
-
-    private static bool IsVirtualKeyPressed(int virtualKey)
-    {
-        return (GetAsyncKeyState(virtualKey) & 0x8000) != 0;
-    }
-
-    private bool TryApplyHotkey(
-        ModifierKeys newModifiers,
-        Key newKey,
-        HotkeyInputKind newInputKind,
-        HotkeyMouseButton newMouseButton)
-    {
-        if (_hwndSource is null
-            || !HotkeyUtilities.IsValidHotkey(newModifiers, newKey, newInputKind, newMouseButton))
+        if (_hwndSource is null || !HotkeyUtilities.IsValidHotkey(newModifiers, newKey))
         {
             return false;
         }
 
         IntPtr hwnd = new WindowInteropHelper(this).Handle;
         ModifierKeys previousModifiers = _hotkeyModifiers;
-        HotkeyInputKind previousInputKind = _hotkeyInputKind;
         Key previousKey = _hotkeyKey;
-        HotkeyMouseButton previousMouseButton = _hotkeyMouseButton;
 
         if (_isHotkeyRegistered)
         {
@@ -585,42 +442,23 @@ public partial class MainWindow : Window
         }
 
         _hotkeyModifiers = HotkeyUtilities.SanitizeModifiers(newModifiers);
-        _hotkeyInputKind = newInputKind;
-        _hotkeyKey = newInputKind == HotkeyInputKind.Keyboard ? newKey : Key.None;
-        _hotkeyMouseButton = newInputKind == HotkeyInputKind.MouseButton
-            ? newMouseButton
-            : HotkeyMouseButton.None;
-
-        bool hotkeyActivated = newInputKind switch
-        {
-            HotkeyInputKind.Keyboard => TryRegisterKeyboardHotkey(hwnd, _hotkeyModifiers, _hotkeyKey),
-            HotkeyInputKind.MouseButton => EnsureMouseHook(),
-            _ => false
-        };
-        _isHotkeyRegistered = newInputKind == HotkeyInputKind.Keyboard && hotkeyActivated;
+        _hotkeyKey = newKey;
+        bool hotkeyActivated = TryRegisterKeyboardHotkey(hwnd, _hotkeyModifiers, _hotkeyKey);
+        _isHotkeyRegistered = hotkeyActivated;
 
         if (hotkeyActivated)
         {
-            UpdateMouseHookState();
             SaveSettings();
             UpdateHotkeyUi();
             return true;
         }
 
         _hotkeyModifiers = previousModifiers;
-        _hotkeyInputKind = previousInputKind;
         _hotkeyKey = previousKey;
-        _hotkeyMouseButton = previousMouseButton;
-        _isHotkeyRegistered = previousInputKind == HotkeyInputKind.Keyboard
-            && TryRegisterKeyboardHotkey(hwnd, _hotkeyModifiers, _hotkeyKey);
-        UpdateMouseHookState();
-
-        string failureReason = newInputKind == HotkeyInputKind.MouseButton
-            ? "Globalny nasluch myszy nie jest dostepny."
-            : "Ten skrot moze byc juz zajety.";
+        _isHotkeyRegistered = TryRegisterKeyboardHotkey(hwnd, _hotkeyModifiers, _hotkeyKey);
 
         System.Windows.MessageBox.Show(
-            $"Nie udalo sie ustawic skrotu {HotkeyUtilities.FormatHotkey(newModifiers, newKey, newInputKind, newMouseButton)}. {failureReason}",
+            $"Nie udalo sie ustawic skrotu {HotkeyUtilities.FormatHotkey(newModifiers, newKey)}. Ten skrot moze byc juz zajety.",
             "AMTool",
             MessageBoxButton.OK,
             MessageBoxImage.Warning);
@@ -682,12 +520,7 @@ public partial class MainWindow : Window
 
             try
             {
-                dialog = new SettingsDialog(
-                    _hotkeyModifiers,
-                    _hotkeyKey,
-                    _hotkeyInputKind,
-                    _hotkeyMouseButton,
-                    _isAutoStartEnabled)
+                dialog = new SettingsDialog(_hotkeyModifiers, _hotkeyKey, _isAutoStartEnabled)
                 {
                     Owner = this
                 };
@@ -714,16 +547,9 @@ public partial class MainWindow : Window
 
             bool hotkeyChanged =
                 dialog.SelectedHotkeyModifiers != _hotkeyModifiers
-                || dialog.SelectedHotkeyInputKind != _hotkeyInputKind
-                || dialog.SelectedHotkeyKey != _hotkeyKey
-                || dialog.SelectedHotkeyMouseButton != _hotkeyMouseButton;
+                || dialog.SelectedHotkeyKey != _hotkeyKey;
 
-            if (hotkeyChanged
-                && !TryApplyHotkey(
-                    dialog.SelectedHotkeyModifiers,
-                    dialog.SelectedHotkeyKey,
-                    dialog.SelectedHotkeyInputKind,
-                    dialog.SelectedHotkeyMouseButton))
+            if (hotkeyChanged && !TryApplyHotkey(dialog.SelectedHotkeyModifiers, dialog.SelectedHotkeyKey))
             {
                 continue;
             }
@@ -749,7 +575,7 @@ public partial class MainWindow : Window
         }
 
         var trayMenu = new Forms.ContextMenuStrip();
-        trayMenu.Items.Add("Pokaz / ukryj", null, (_, _) => ToggleWindowVisibility());
+        trayMenu.Items.Add("Pokaz / ukryj", null, (_, _) => RequestToggleWindowVisibility());
         trayMenu.Items.Add("Zamknij", null, (_, _) => ExitApplication());
 
         _applicationTrayIcon = LoadApplicationTrayIcon();
@@ -762,27 +588,52 @@ public partial class MainWindow : Window
             ContextMenuStrip = trayMenu
         };
 
-        _trayIcon.DoubleClick += (_, _) => ToggleWindowVisibility();
+        _trayIcon.DoubleClick += (_, _) => RequestToggleWindowVisibility();
     }
 
     private IntPtr WndProc(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam, ref bool handled)
     {
         if (msg == WM_HOTKEY && wParam.ToInt32() == HotkeyIdToggleWindow)
         {
-            ToggleWindowVisibility();
+            RequestToggleWindowVisibility();
             handled = true;
         }
 
         return IntPtr.Zero;
     }
 
-    private async void ToggleWindowVisibility()
+    private void RequestToggleWindowVisibility()
+    {
+        if (!Dispatcher.CheckAccess())
+        {
+            if (Interlocked.Exchange(ref _isVisibilityToggleRequestQueued, 1) == 1)
+            {
+                return;
+            }
+
+            _ = Dispatcher.BeginInvoke(new Action(() =>
+            {
+                Interlocked.Exchange(ref _isVisibilityToggleRequestQueued, 0);
+                ToggleWindowVisibility();
+            }));
+            return;
+        }
+
+        ToggleWindowVisibility();
+    }
+
+    private void ToggleWindowVisibility()
     {
         if (_isVisibilityAnimationRunning)
         {
             return;
         }
 
+        _ = ToggleWindowVisibilityCoreAsync();
+    }
+
+    private async Task ToggleWindowVisibilityCoreAsync()
+    {
         if (IsVisible)
         {
             await HideToTrayAsync();
@@ -824,16 +675,25 @@ public partial class MainWindow : Window
     private async Task ShowFromTrayAsync()
     {
         _isVisibilityAnimationRunning = true;
-        PositionWindow();
-        ExitHiddenIdleMode();
 
-        Show();
-        UpdateMouseHookState();
-        WindowState = WindowState.Normal;
-        RefreshShortcutStrip(animateFromCenter: true);
-        BringWindowToFront();
-        await Task.Delay(GetOrbitAnimationTotalDurationMs(ShortcutOrbitLayer.Children.Count, OrbitEntryDurationMs));
-        _isVisibilityAnimationRunning = false;
+        try
+        {
+            PositionWindow();
+            ExitHiddenIdleMode();
+            HideHoverBubble();
+
+            Show();
+            WindowState = WindowState.Normal;
+            RefreshShortcutStrip(animateFromCenter: true);
+            BringWindowToFront();
+            await Task.Delay(GetOrbitAnimationTotalDurationMs(ShortcutOrbitLayer.Children.Count, OrbitEntryDurationMs));
+        }
+        finally
+        {
+            _isVisibilityAnimationRunning = false;
+        }
+
+        await TryProcessDeferredHideRequestAsync();
     }
 
     private async Task HideToTrayAsync()
@@ -844,12 +704,19 @@ public partial class MainWindow : Window
         }
 
         _isVisibilityAnimationRunning = true;
-        AnimateOrbitCollapse();
-        await Task.Delay(GetOrbitAnimationTotalDurationMs(ShortcutOrbitLayer.Children.Count, OrbitExitDurationMs));
-        Hide();
-        EnterHiddenIdleMode();
-        UpdateMouseHookState();
-        _isVisibilityAnimationRunning = false;
+
+        try
+        {
+            HideHoverBubble();
+            AnimateOrbitCollapse();
+            await Task.Delay(GetOrbitAnimationTotalDurationMs(ShortcutOrbitLayer.Children.Count, OrbitExitDurationMs));
+            Hide();
+            EnterHiddenIdleMode();
+        }
+        finally
+        {
+            _isVisibilityAnimationRunning = false;
+        }
     }
 
     private void HideToTrayImmediate()
@@ -859,9 +726,42 @@ public partial class MainWindow : Window
             return;
         }
 
+        HideHoverBubble();
         Hide();
         EnterHiddenIdleMode();
-        UpdateMouseHookState();
+    }
+
+    private async Task TryProcessDeferredHideRequestAsync()
+    {
+        if (!_hideRequestedAfterVisibilityAnimation)
+        {
+            return;
+        }
+
+        if (_isExitRequested || !IsVisible)
+        {
+            _hideRequestedAfterVisibilityAnimation = false;
+            return;
+        }
+
+        if (_isVisibilityAnimationRunning)
+        {
+            return;
+        }
+
+        if (IsActive)
+        {
+            _hideRequestedAfterVisibilityAnimation = false;
+            return;
+        }
+
+        if (_blockingInteractionDepth > 0 || IsAnyShortcutContextMenuOpen())
+        {
+            return;
+        }
+
+        _hideRequestedAfterVisibilityAnimation = false;
+        await HideToTrayAsync();
     }
 
     private void PositionWindow()
@@ -885,24 +785,23 @@ public partial class MainWindow : Window
 
     private void BringWindowToFront()
     {
+        Topmost = true;
         Activate();
         Focus();
-
-        Topmost = true;
-        Topmost = false;
     }
 
-    private static bool IsForegroundWindowOwnedByCurrentProcess()
+    private bool IsAnyShortcutContextMenuOpen()
     {
-        IntPtr foregroundWindow = GetForegroundWindow();
-
-        if (foregroundWindow == IntPtr.Zero)
+        for (int index = 0; index < ShortcutOrbitLayer.Children.Count; index++)
         {
-            return false;
+            if (ShortcutOrbitLayer.Children[index] is Border tile
+                && tile.ContextMenu?.IsOpen == true)
+            {
+                return true;
+            }
         }
 
-        _ = GetWindowThreadProcessId(foregroundWindow, out uint processId);
-        return processId == (uint)Environment.ProcessId;
+        return false;
     }
 
     private void ExitApplication()
@@ -1100,6 +999,7 @@ public partial class MainWindow : Window
     private void RefreshShortcutStrip(bool animateFromCenter = false)
     {
         ClampShortcutScrollIndex();
+        HideHoverBubble();
         ShortcutOrbitLayer.Children.Clear();
 
         List<object?> visibleOrbitItems = GetVisibleOrbitItems(_shortcutScrollIndex);
@@ -1475,14 +1375,13 @@ public partial class MainWindow : Window
         scaleTransform.BeginAnimation(ScaleTransform.ScaleYProperty, CreateAnimation(targetScale, durationMs, TimeSpan.Zero, OrbitEaseOut));
     }
 
-    private static System.Windows.Controls.ToolTip CreateTileTooltip(string text)
+    private static void SetTileScale(Border tile, double targetScale)
     {
-        return new System.Windows.Controls.ToolTip
-        {
-            Content = text,
-            Placement = System.Windows.Controls.Primitives.PlacementMode.Bottom,
-            HasDropShadow = false
-        };
+        ScaleTransform scaleTransform = GetTileScaleTransform(tile);
+        scaleTransform.BeginAnimation(ScaleTransform.ScaleXProperty, null);
+        scaleTransform.BeginAnimation(ScaleTransform.ScaleYProperty, null);
+        scaleTransform.ScaleX = targetScale;
+        scaleTransform.ScaleY = targetScale;
     }
 
     private void HandleTileMouseEnter(Border tile)
@@ -1495,7 +1394,8 @@ public partial class MainWindow : Window
             return;
         }
 
-        AnimateTileScale(tile, HoverTileScale, OrbitHoverDurationMs);
+        SetTileScale(tile, HoverTileScale);
+        ShowHoverBubble(tile);
     }
 
     private void HandleTileMouseLeave(Border tile)
@@ -1508,7 +1408,51 @@ public partial class MainWindow : Window
             return;
         }
 
-        AnimateTileScale(tile, 1, OrbitHoverDurationMs);
+        SetTileScale(tile, 1);
+        HideHoverBubble(tile);
+    }
+
+    private void ShowHoverBubble(Border tile)
+    {
+        string hoverText = OrbitUiUtilities.GetHoverBubbleText(tile.Tag);
+
+        if (string.IsNullOrWhiteSpace(hoverText))
+        {
+            HideHoverBubble();
+            return;
+        }
+
+        _hoveredTile = tile;
+        HoverBubbleText.Text = hoverText;
+        HoverBubble.Visibility = Visibility.Visible;
+        HoverBubble.Measure(new System.Windows.Size(double.PositiveInfinity, double.PositiveInfinity));
+
+        System.Windows.Size sceneSize = new(
+            OrbitScene.ActualWidth > 0 ? OrbitScene.ActualWidth : OrbitScene.Width,
+            OrbitScene.ActualHeight > 0 ? OrbitScene.ActualHeight : OrbitScene.Height);
+
+        System.Windows.Point bubblePosition = OrbitUiUtilities.CalculateHoverBubblePosition(
+            GetTilePosition(tile),
+            new System.Windows.Size(tile.Width, tile.Height),
+            HoverBubble.DesiredSize,
+            sceneSize);
+
+        HoverBubbleTransform.X = bubblePosition.X;
+        HoverBubbleTransform.Y = bubblePosition.Y;
+    }
+
+    private void HideHoverBubble()
+    {
+        _hoveredTile = null;
+        HoverBubble.Visibility = Visibility.Collapsed;
+    }
+
+    private void HideHoverBubble(Border tile)
+    {
+        if (ReferenceEquals(_hoveredTile, tile))
+        {
+            HideHoverBubble();
+        }
     }
 
     private static bool IsDragGesture(System.Windows.Point startPosition, System.Windows.Point currentPosition)
@@ -1572,6 +1516,7 @@ public partial class MainWindow : Window
             AnimateTileScale(_dragTargetTile, 1, 120);
         }
 
+        HideHoverBubble();
         _pressedShortcutTile?.ReleaseMouseCapture();
         _pressedShortcutTile = null;
         _pressedShortcut = null;
@@ -1655,19 +1600,12 @@ public partial class MainWindow : Window
 
     private void UpdateInfoTooltip(int totalTileCount)
     {
-        string scrollInfo = totalTileCount > MaxVisibleOrbitTiles
-            ? $"Kolko myszy przewija kolejne skroty w petli. Widok {_shortcutScrollIndex + 1} z {GetMaxShortcutScrollIndex(totalTileCount) + 1}."
-            : "Do 5 skrotow widac od razu bez przewijania.";
-
-        InfoBadge.ToolTip = string.Join(
-            Environment.NewLine,
-            $"{GetCurrentHotkeyText()} wywoluje AMTool.",
-            "LPM uruchamia aplikacje.",
-            "PPM usuwa skrot z listy.",
-            "PPM na ( i ) otwiera ustawienia.",
-            $"Autostart: {(_isAutoStartEnabled ? "wlaczony" : "wylaczony")}.",
-            $"Liczba skrotow: {_shortcuts.Count}.",
-            scrollInfo);
+        InfoBadge.ToolTip = OrbitUiUtilities.BuildInfoTooltip(
+            GetCurrentHotkeyText(),
+            _isAutoStartEnabled,
+            _shortcuts.Count,
+            totalTileCount,
+            _shortcutScrollIndex);
     }
 
     private Border CreateShortcutTile(AppShortcutEntry shortcut)
@@ -1707,12 +1645,8 @@ public partial class MainWindow : Window
             Cursor = System.Windows.Input.Cursors.Hand,
             Uid = BuildOrbitItemKey(shortcut),
             Tag = shortcut,
-            CacheMode = OrbitTileBitmapCache,
-            ToolTip = CreateTileTooltip(shortcut.DisplayName)
+            CacheMode = OrbitTileBitmapCache
         };
-
-        ToolTipService.SetInitialShowDelay(border, 280);
-        ToolTipService.SetShowDuration(border, 4000);
 
         var contextMenu = new ContextMenu();
         var removeItem = new MenuItem
@@ -1722,6 +1656,7 @@ public partial class MainWindow : Window
         };
         removeItem.Click += RemoveShortcutMenuItem_Click;
         contextMenu.Items.Add(removeItem);
+        contextMenu.Closed += ShortcutContextMenu_Closed;
 
         border.ContextMenu = contextMenu;
         border.MouseEnter += ShortcutTile_MouseEnter;
@@ -1756,12 +1691,9 @@ public partial class MainWindow : Window
             Child = plusText,
             Cursor = System.Windows.Input.Cursors.Hand,
             Uid = AddOrbitItemKey,
-            CacheMode = OrbitTileBitmapCache,
-            ToolTip = CreateTileTooltip("Dodaj skrot")
+            Tag = AddOrbitItemKey,
+            CacheMode = OrbitTileBitmapCache
         };
-
-        ToolTipService.SetInitialShowDelay(border, 280);
-        ToolTipService.SetShowDuration(border, 3000);
         border.MouseEnter += AddTile_MouseEnter;
         border.MouseLeave += AddTile_MouseLeave;
         border.MouseLeftButtonUp += AddShortcutTile_Click;
@@ -1775,6 +1707,7 @@ public partial class MainWindow : Window
             return;
         }
 
+        HideHoverBubble();
         int totalTileCount = _shortcuts.Count + 1;
         int maxScrollIndex = GetMaxShortcutScrollIndex(totalTileCount);
 
@@ -1813,6 +1746,7 @@ public partial class MainWindow : Window
         _dragSourceSlotPosition = GetTilePosition(border);
         _isShortcutDragActive = false;
         UpdateDragTargetTile(null);
+        HideHoverBubble();
 
         System.Windows.Controls.Panel.SetZIndex(border, 1000);
         border.CaptureMouse();
@@ -1899,6 +1833,11 @@ public partial class MainWindow : Window
         }
     }
 
+    private async void ShortcutContextMenu_Closed(object? sender, RoutedEventArgs e)
+    {
+        await TryProcessDeferredHideRequestAsync();
+    }
+
     private void AddTile_MouseEnter(object sender, System.Windows.Input.MouseEventArgs e)
     {
         if (sender is Border border)
@@ -1923,6 +1862,7 @@ public partial class MainWindow : Window
 
     private void AddShortcutTile_Click(object sender, MouseButtonEventArgs e)
     {
+        HideHoverBubble();
         ShowAddShortcutDialog();
     }
 
@@ -2233,51 +2173,11 @@ public partial class MainWindow : Window
         return easing;
     }
 
-    private delegate IntPtr LowLevelMouseProc(int nCode, IntPtr wParam, IntPtr lParam);
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct POINT
-    {
-        public int X;
-        public int Y;
-    }
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct MSLLHOOKSTRUCT
-    {
-        public POINT pt;
-        public uint mouseData;
-        public uint flags;
-        public uint time;
-        public IntPtr dwExtraInfo;
-    }
-
     [DllImport("user32.dll", SetLastError = true)]
     private static extern bool RegisterHotKey(IntPtr hWnd, int id, uint fsModifiers, uint vk);
 
     [DllImport("user32.dll", SetLastError = true)]
     private static extern bool UnregisterHotKey(IntPtr hWnd, int id);
-
-    [DllImport("user32.dll", SetLastError = true)]
-    private static extern IntPtr SetWindowsHookEx(int idHook, LowLevelMouseProc lpfn, IntPtr hMod, uint dwThreadId);
-
-    [DllImport("user32.dll", SetLastError = true)]
-    private static extern bool UnhookWindowsHookEx(IntPtr hhk);
-
-    [DllImport("user32.dll")]
-    private static extern IntPtr CallNextHookEx(IntPtr hhk, int nCode, IntPtr wParam, IntPtr lParam);
-
-    [DllImport("user32.dll")]
-    private static extern IntPtr GetForegroundWindow();
-
-    [DllImport("user32.dll")]
-    private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
-
-    [DllImport("user32.dll")]
-    private static extern short GetAsyncKeyState(int vKey);
-
-    [DllImport("kernel32.dll", CharSet = CharSet.Auto, SetLastError = true)]
-    private static extern IntPtr GetModuleHandle(string? lpModuleName);
 
     [DllImport("psapi.dll", SetLastError = true)]
     private static extern bool EmptyWorkingSet(IntPtr hProcess);

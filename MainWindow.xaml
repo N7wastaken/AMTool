@@ -71,7 +71,7 @@
                                 Background="#1EF4F7FB"
                                 BorderBrush="#44F4F7FB"
                                 BorderThickness="1">
-                            <TextBlock HorizontalAlignment="Center"
+                                <TextBlock HorizontalAlignment="Center"
                                        VerticalAlignment="Center"
                                        Text="i"
                                        FontSize="16"
@@ -79,6 +79,27 @@
                                        Foreground="White"/>
                         </Border>
                     </Grid>
+
+                    <Border x:Name="HoverBubble"
+                            Grid.ZIndex="30"
+                            Padding="14,9"
+                            HorizontalAlignment="Left"
+                            VerticalAlignment="Top"
+                            Background="#EE161D27"
+                            BorderBrush="#66F4F7FB"
+                            BorderThickness="1"
+                            CornerRadius="14"
+                            IsHitTestVisible="False"
+                            SnapsToDevicePixels="True"
+                            Visibility="Collapsed">
+                        <Border.RenderTransform>
+                            <TranslateTransform x:Name="HoverBubbleTransform"/>
+                        </Border.RenderTransform>
+                        <TextBlock x:Name="HoverBubbleText"
+                                   FontSize="14"
+                                   FontWeight="SemiBold"
+                                   Foreground="White"/>
+                    </Border>
                 </Grid>
             </Grid>
         </Border>

@@ -31,7 +31,7 @@ public sealed class FirstRunTutorialDialog : Window
                 "Po najechaniu slot lekko sie powieksza, a nazwa aplikacji pokazuje sie w dymku."),
             new TutorialStep(
                 "Skrot, ustawienia i informacje",
-                "Domyslnie Ctrl+Shift+Q wywoluje AMTool, ale w ustawieniach mozesz przypisac tez pojedynczy klawisz, inna kombinacje albo przycisk myszy.",
+                "Domyslnie Ctrl+Shift+Q wywoluje AMTool, ale w ustawieniach mozesz przypisac tez pojedynczy klawisz albo inna kombinacje.",
                 "PPM na ( i ) otwiera ustawienia, gdzie zmienisz skrot i autostart, a po najechaniu na ( i ) sprawdzisz najwazniejsze informacje w tooltipie.")
         ];
 

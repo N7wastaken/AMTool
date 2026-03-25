@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net9.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <UseWPF>true</UseWPF>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="..\AppShortcutEntry.cs" Link="AppShortcutEntry.cs" />
+    <Compile Include="..\HotkeyUtilities.cs" Link="HotkeyUtilities.cs" />
+    <Compile Include="..\OrbitUiUtilities.cs" Link="OrbitUiUtilities.cs" />
+    <Compile Include="..\WindowVisibilityUtilities.cs" Link="WindowVisibilityUtilities.cs" />
+  </ItemGroup>
+
+</Project>
