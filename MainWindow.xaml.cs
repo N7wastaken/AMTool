@@ -100,7 +100,6 @@ public partial class MainWindow : Window
     private bool _isOrbitScrollBurstActive;
     private bool _isAutoStartEnabled;
     private bool _hasCompletedTutorial;
-    private bool _hideRequestedAfterVisibilityAnimation;
     private int _blockingInteractionDepth;
     private int _isVisibilityToggleRequestQueued;
     private CancellationTokenSource? _hiddenIdleCleanupCancellation;
@@ -287,43 +286,24 @@ public partial class MainWindow : Window
             return;
         }
 
-        if (WindowVisibilityUtilities.ShouldDeferHideUntilAnimationCompletes(_isVisibilityAnimationRunning))
+        if (_isVisibilityAnimationRunning)
         {
-            _hideRequestedAfterVisibilityAnimation = true;
             return;
         }
 
         await Task.Delay(40);
 
-        if (_isExitRequested || !IsVisible || IsActive)
+        if (_isExitRequested || !IsVisible)
         {
             return;
         }
 
-        if (WindowVisibilityUtilities.ShouldDeferHideUntilAnimationCompletes(_isVisibilityAnimationRunning))
-        {
-            _hideRequestedAfterVisibilityAnimation = true;
-            return;
-        }
-
-        if (_blockingInteractionDepth > 0)
+        if (_isVisibilityAnimationRunning)
         {
             return;
         }
 
-        if (IsAnyShortcutContextMenuOpen())
-        {
-            _hideRequestedAfterVisibilityAnimation = true;
-            return;
-        }
-
-        if (!WindowVisibilityUtilities.CanHideAfterDeactivation(
-                _isExitRequested,
-                IsVisible,
-                IsActive,
-                _isVisibilityAnimationRunning,
-                _blockingInteractionDepth,
-                isAnyShortcutContextMenuOpen: false))
+        if (_blockingInteractionDepth > 0 || IsAnyShortcutContextMenuOpen())
         {
             return;
         }
@@ -692,8 +672,6 @@ public partial class MainWindow : Window
         {
             _isVisibilityAnimationRunning = false;
         }
-
-        await TryProcessDeferredHideRequestAsync();
     }
 
     private async Task HideToTrayAsync()
@@ -729,39 +707,6 @@ public partial class MainWindow : Window
         HideHoverBubble();
         Hide();
         EnterHiddenIdleMode();
-    }
-
-    private async Task TryProcessDeferredHideRequestAsync()
-    {
-        if (!_hideRequestedAfterVisibilityAnimation)
-        {
-            return;
-        }
-
-        if (_isExitRequested || !IsVisible)
-        {
-            _hideRequestedAfterVisibilityAnimation = false;
-            return;
-        }
-
-        if (_isVisibilityAnimationRunning)
-        {
-            return;
-        }
-
-        if (IsActive)
-        {
-            _hideRequestedAfterVisibilityAnimation = false;
-            return;
-        }
-
-        if (_blockingInteractionDepth > 0 || IsAnyShortcutContextMenuOpen())
-        {
-            return;
-        }
-
-        _hideRequestedAfterVisibilityAnimation = false;
-        await HideToTrayAsync();
     }
 
     private void PositionWindow()
@@ -1425,15 +1370,15 @@ public partial class MainWindow : Window
         _hoveredTile = tile;
         HoverBubbleText.Text = hoverText;
         HoverBubble.Visibility = Visibility.Visible;
-        HoverBubble.Measure(new System.Windows.Size(double.PositiveInfinity, double.PositiveInfinity));
+        HoverBubble.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
 
-        System.Windows.Size sceneSize = new(
+        Size sceneSize = new(
             OrbitScene.ActualWidth > 0 ? OrbitScene.ActualWidth : OrbitScene.Width,
             OrbitScene.ActualHeight > 0 ? OrbitScene.ActualHeight : OrbitScene.Height);
 
         System.Windows.Point bubblePosition = OrbitUiUtilities.CalculateHoverBubblePosition(
             GetTilePosition(tile),
-            new System.Windows.Size(tile.Width, tile.Height),
+            new Size(tile.Width, tile.Height),
             HoverBubble.DesiredSize,
             sceneSize);
 
@@ -1656,7 +1601,6 @@ public partial class MainWindow : Window
         };
         removeItem.Click += RemoveShortcutMenuItem_Click;
         contextMenu.Items.Add(removeItem);
-        contextMenu.Closed += ShortcutContextMenu_Closed;
 
         border.ContextMenu = contextMenu;
         border.MouseEnter += ShortcutTile_MouseEnter;
@@ -1831,11 +1775,6 @@ public partial class MainWindow : Window
         {
             HandleTileMouseLeave(border);
         }
-    }
-
-    private async void ShortcutContextMenu_Closed(object? sender, RoutedEventArgs e)
-    {
-        await TryProcessDeferredHideRequestAsync();
     }
 
     private void AddTile_MouseEnter(object sender, System.Windows.Input.MouseEventArgs e)

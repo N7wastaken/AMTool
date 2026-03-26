@@ -12,6 +12,7 @@
     <Compile Include="..\AppShortcutEntry.cs" Link="AppShortcutEntry.cs" />
     <Compile Include="..\HotkeyUtilities.cs" Link="HotkeyUtilities.cs" />
     <Compile Include="..\OrbitUiUtilities.cs" Link="OrbitUiUtilities.cs" />
+    <Compile Include="..\ShortcutAssignmentUtilities.cs" Link="ShortcutAssignmentUtilities.cs" />
     <Compile Include="..\WindowVisibilityUtilities.cs" Link="WindowVisibilityUtilities.cs" />
   </ItemGroup>
 
