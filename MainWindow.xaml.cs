@@ -1370,15 +1370,15 @@ public partial class MainWindow : Window
         _hoveredTile = tile;
         HoverBubbleText.Text = hoverText;
         HoverBubble.Visibility = Visibility.Visible;
-        HoverBubble.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
+        HoverBubble.Measure(new System.Windows.Size(double.PositiveInfinity, double.PositiveInfinity));
 
-        Size sceneSize = new(
+        System.Windows.Size sceneSize = new(
             OrbitScene.ActualWidth > 0 ? OrbitScene.ActualWidth : OrbitScene.Width,
             OrbitScene.ActualHeight > 0 ? OrbitScene.ActualHeight : OrbitScene.Height);
 
         System.Windows.Point bubblePosition = OrbitUiUtilities.CalculateHoverBubblePosition(
             GetTilePosition(tile),
-            new Size(tile.Width, tile.Height),
+            new System.Windows.Size(tile.Width, tile.Height),
             HoverBubble.DesiredSize,
             sceneSize);
 
