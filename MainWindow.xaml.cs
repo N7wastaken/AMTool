@@ -575,7 +575,11 @@ public partial class MainWindow : Window
     {
         if (msg == WM_HOTKEY && wParam.ToInt32() == HotkeyIdToggleWindow)
         {
-            RequestToggleWindowVisibility();
+            if (WindowVisibilityUtilities.CanToggleVisibilityFromHotkey(_blockingInteractionDepth))
+            {
+                RequestToggleWindowVisibility();
+            }
+
             handled = true;
         }
 

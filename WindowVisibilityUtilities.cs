@@ -2,6 +2,11 @@ namespace AMTool;
 
 internal static class WindowVisibilityUtilities
 {
+    internal static bool CanToggleVisibilityFromHotkey(int blockingInteractionDepth)
+    {
+        return blockingInteractionDepth == 0;
+    }
+
     internal static bool ShouldDeferHideUntilAnimationCompletes(bool isVisibilityAnimationRunning)
     {
         return isVisibilityAnimationRunning;

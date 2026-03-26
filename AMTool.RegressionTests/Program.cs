@@ -17,6 +17,7 @@ internal static class RegressionTestRunner
         Run(nameof(CalculateHoverBubblePosition_ClampsWithinScene), CalculateHoverBubblePosition_ClampsWithinScene);
         Run(nameof(BuildInfoTooltip_UsesCorrectScrollMessage), BuildInfoTooltip_UsesCorrectScrollMessage);
         Run(nameof(GetScrollIndexToRevealShortcut_RevealsNewestShortcut), GetScrollIndexToRevealShortcut_RevealsNewestShortcut);
+        Run(nameof(HotkeyToggle_IsBlockedDuringModalInteraction), HotkeyToggle_IsBlockedDuringModalInteraction);
         Run(nameof(VisibilityDeactivationBehavior_DefersDuringAnimationAndHidesAfterFocusLoss), VisibilityDeactivationBehavior_DefersDuringAnimationAndHidesAfterFocusLoss);
 
         if (_failures == 0)
@@ -99,6 +100,12 @@ internal static class RegressionTestRunner
         AssertEqual(0, ShortcutAssignmentUtilities.GetScrollIndexToRevealShortcut(shortcutCount: 1, shortcutIndex: 0));
         AssertEqual(3, ShortcutAssignmentUtilities.GetScrollIndexToRevealShortcut(shortcutCount: 6, shortcutIndex: 5));
         AssertEqual(4, ShortcutAssignmentUtilities.GetScrollIndexToRevealShortcut(shortcutCount: 7, shortcutIndex: 6));
+    }
+
+    private static void HotkeyToggle_IsBlockedDuringModalInteraction()
+    {
+        AssertTrue(WindowVisibilityUtilities.CanToggleVisibilityFromHotkey(blockingInteractionDepth: 0));
+        AssertFalse(WindowVisibilityUtilities.CanToggleVisibilityFromHotkey(blockingInteractionDepth: 1));
     }
 
     private static void VisibilityDeactivationBehavior_DefersDuringAnimationAndHidesAfterFocusLoss()
